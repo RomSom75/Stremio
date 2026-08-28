@@ -55,7 +55,7 @@ Dans le dépôt GitHub, ajoute ces secrets dans **Settings → Secrets and varia
 - `SMTP_USERNAME`
 - `SMTP_PASSWORD` (mot de passe d'application Gmail, pas le mot de passe du compte)
 
-En cas d'ambiguïté, l'exécution échoue sans toucher MDBList, envoie `reports/unresolved.json` à `legay.romain@gmail.com` et publie `cnc-sync-report` comme artefact téléchargeable. Après une mise à jour CNC réussie, un email de confirmation est également envoyé à cette adresse. Télécharge le rapport, complète `overrides.json`, puis envoie ce fichier dans le dépôt avant de relancer le workflow.
+En cas d'ambiguïté, l'exécution échoue sans toucher MDBList, envoie `reports/unresolved.json` à l'adresse email définie et publie `cnc-sync-report` comme artefact téléchargeable. Après une mise à jour CNC réussie, un email de confirmation est également envoyé à cette adresse. Télécharge le rapport, complète `overrides.json`, puis envoie ce fichier dans le dépôt avant de relancer le workflow.
 
 ## Stremio
 
