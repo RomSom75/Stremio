@@ -1,0 +1,101 @@
+name: Sync CNC million-entry films to MDBList
+
+on:
+  schedule:
+    - cron: "17 7 * * *" # Every day at 07:17 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only calculate/report changes"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Check CNC update
+        id: cnc
+        env:
+          CNC_METADATA_URL: https://www.data.gouv.fr/api/1/datasets/films-ayant-realise-plus-dun-million-dentrees
+        run: |
+          python sync.py --check-update
+          echo "changed=$(jq -r '.changed' reports/cnc-update.json)" >> "$GITHUB_OUTPUT"
+          echo "needs_sync=$(jq -r '.needs_sync' reports/cnc-update.json)" >> "$GITHUB_OUTPUT"
+          echo "current_update=$(jq -r '.current_update' reports/cnc-update.json)" >> "$GITHUB_OUTPUT"
+      - name: Synchronise list
+        if: success()
+        env:
+          TMDB_API_TOKEN: ${{ secrets.TMDB_API_TOKEN }}
+          MDBLIST_API_KEY: ${{ secrets.MDBLIST_API_KEY }}
+          MDBLIST_WATCHED_LIST_ID: ${{ secrets.MDBLIST_WATCHED_LIST_ID }}
+          MDBLIST_OUTPUT_LIST_ID: ${{ secrets.MDBLIST_OUTPUT_LIST_ID }}
+          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
+          TRAKT_USERNAME: ${{ secrets.TRAKT_USERNAME }}
+          TRAKT_LIST_SLUG: ${{ secrets.TRAKT_LIST_SLUG }}
+          CNC_DATASET_URL: https://www.data.gouv.fr/api/1/datasets/r/8e92a471-00a9-445c-ad41-56fe484605b0
+          FAIL_ON_UNRESOLVED: "true"
+        run: >-
+          python sync.py
+          ${{ inputs.dry_run == true && '--dry-run' || '' }}
+      - name: Check unresolved report
+        id: review
+        if: always() && steps.cnc.outputs.changed == 'true'
+        run: echo "needed=$(jq 'length > 0' reports/unresolved.json 2>/dev/null || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Email unresolved films
+        if: failure() && steps.review.outputs.needed == 'true'
+        uses: dawidd6/action-send-mail@v6
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "CNC sync: films à résoudre"
+          to: legay.romain@gmail.com
+          from: CNC MDBList sync <${{ secrets.SMTP_USERNAME }}>
+          body: |
+            La mise à jour CNC a rencontré des films non résolus.
+            Consulte l'artefact cnc-sync-report dans cette exécution GitHub Actions.
+          attachments: reports/unresolved.json
+      - name: Email CNC update
+        if: success() && steps.cnc.outputs.changed == 'true' && inputs.dry_run != true
+        uses: dawidd6/action-send-mail@v6
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "CNC mise à jour : liste MDBList synchronisée"
+          to: legay.romain@gmail.com
+          from: CNC MDBList sync <${{ secrets.SMTP_USERNAME }}>
+          body: |
+            Le CNC a publié une nouvelle version de sa liste.
+            La liste MDBList a été synchronisée avec succès.
+            Date de mise à jour CNC : ${{ steps.cnc.outputs.current_update }}
+      - name: Commit CNC update state
+        if: success() && steps.cnc.outputs.changed == 'true' && inputs.dry_run != true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cnc-state.json
+          git diff --cached --quiet || git commit -m "chore: record CNC dataset update"
+          git push
+      - name: Upload review report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cnc-sync-report
+          path: reports/
+          if-no-files-found: ignore
