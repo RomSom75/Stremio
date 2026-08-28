@@ -20,7 +20,7 @@ Renseigne ensuite `.env` :
 - `TMDB_API_TOKEN` : crée un jeton **API Read Access Token** depuis [TMDb → API](https://www.themoviedb.org/settings/api), ou utilise une clé API v3. Le script détecte le format et utilise automatiquement `Authorization: Bearer` pour v4 ou `api_key` pour v3.
 - `MDBLIST_API_KEY` : récupère la clé dans [MDBList Preferences](https://mdblist.com/preferences/).
 - `MDBLIST_WATCHED_LIST_ID` : facultatif. S'il est vide, le script vérifie directement l'état **Watched** de chaque film via l'API MDBList (`POST /sync/state/movie/tmdb`). Sinon, indique l'identifiant numérique ou le chemin `utilisateur/nom-de-liste` d'une liste MDBList contenant tes films vus.
-- `MDBLIST_OUTPUT_LIST_ID` : l'identifiant numérique, ou le chemin `utilisateur/nom-de-liste`, d'une liste **statique**, par exemple `orniam/1m-france`.
+- `MDBLIST_OUTPUT_LIST_ID` : l'identifiant numérique, ou le chemin `utilisateur/nom-de-liste`, d'une liste **statique**.
 
 Pour utiliser automatiquement l'historique Trakt à la place de MDBList pour les films vus, renseigne `TRAKT_CLIENT_ID` et `TRAKT_USERNAME`. Ce mode nécessite un abonnement **Trakt VIP**, car Trakt réserve la création d'applications API aux membres VIP. Sans VIP, laisse ces variables vides : le script vérifie alors l'état Watched MDBList. Le client ID se crée dans [Trakt → Your API Apps](https://trakt.tv/oauth/applications). `TRAKT_LIST_SLUG` est facultatif si tu préfères une liste Trakt personnalisée. Quand le mode Trakt est configuré, `MDBLIST_WATCHED_LIST_ID` n'est pas utilisé.
 
