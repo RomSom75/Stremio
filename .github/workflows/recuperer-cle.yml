@@ -7,32 +7,72 @@ permissions: {}
 
 jobs:
   envoyer:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
+
     steps:
-      - name: Vérifier la présence de la clé
+      - name: Envoyer la clé par Gmail
         env:
           MDBLIST_API_KEY: ${{ secrets.MDBLIST_API_KEY }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        shell: bash
         run: |
-          if [ -z "$MDBLIST_API_KEY" ]; then
-            echo "Le secret MDBLIST_API_KEY est absent ou vide."
-            exit 1
-          fi
+          python3 - <<'PY'
+          import os
+          import smtplib
+          import ssl
+          import sys
+          from email.message import EmailMessage
 
-      - name: Envoyer la clé par mail
-        uses: dawidd6/action-send-mail@v6
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "Ma clé API MDBList"
-          to: legay.romain@gmail.com
-          from: 'MDBList <${{ secrets.SMTP_USERNAME }}>'
-          body: |
-            Voici la clé API MDBList enregistrée dans ton dépôt GitHub :
+          required = [
+              "MDBLIST_API_KEY",
+              "SMTP_USERNAME",
+              "SMTP_PASSWORD",
+          ]
 
-            ${{ secrets.MDBLIST_API_KEY }}
-          nodemailerlog: false
-          nodemailerdebug: false
+          for name in required:
+              if not os.environ.get(name, "").strip():
+                  print(f"Secret absent ou vide : {name}")
+                  sys.exit(1)
+
+          message = EmailMessage()
+          message["Subject"] = "Ma clé API MDBList"
+          message["From"] = os.environ["SMTP_USERNAME"]
+          message["To"] = "legay.romain@gmail.com"
+          message.set_content(
+              "Voici ta clé API MDBList :\n\n"
+              + os.environ["MDBLIST_API_KEY"]
+              + "\n"
+          )
+
+          try:
+              with smtplib.SMTP_SSL(
+                  "smtp.gmail.com",
+                  465,
+                  context=ssl.create_default_context(),
+                  timeout=30,
+              ) as smtp:
+                  smtp.login(
+                      os.environ["SMTP_USERNAME"],
+                      os.environ["SMTP_PASSWORD"],
+                  )
+                  smtp.send_message(message)
+
+          except smtplib.SMTPAuthenticationError:
+              print(
+                  "Connexion Gmail refusée : vérifier SMTP_USERNAME "
+                  "et le mot de passe d'application SMTP_PASSWORD."
+              )
+              sys.exit(1)
+
+          except Exception as error:
+              print(
+                  "Échec de l'envoi : "
+                  + type(error).__name__
+                  + ". Aucun secret affiché."
+              )
+              sys.exit(1)
+
+          print("Mail accepté par Gmail. Vérifie ta boîte et les spams.")
+          PY
