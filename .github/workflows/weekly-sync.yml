@@ -40,9 +40,6 @@ jobs:
           MDBLIST_API_KEY: ${{ secrets.MDBLIST_API_KEY }}
           MDBLIST_WATCHED_LIST_ID: ${{ secrets.MDBLIST_WATCHED_LIST_ID }}
           MDBLIST_OUTPUT_LIST_ID: ${{ secrets.MDBLIST_OUTPUT_LIST_ID }}
-          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
-          TRAKT_USERNAME: ${{ secrets.TRAKT_USERNAME }}
-          TRAKT_LIST_SLUG: ${{ secrets.TRAKT_LIST_SLUG }}
           CNC_DATASET_URL: https://www.data.gouv.fr/api/1/datasets/r/8e92a471-00a9-445c-ad41-56fe484605b0
           FAIL_ON_UNRESOLVED: "true"
         run: >-
