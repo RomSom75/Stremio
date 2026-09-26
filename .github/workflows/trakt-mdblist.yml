@@ -20,16 +20,18 @@ concurrency:
 
 jobs:
   sync:
-    # Set this variable only after a successful manual check.
     if: github.event_name == 'workflow_dispatch' || vars.TRAKT_SYNC_ENABLED == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
       - name: Vérifier le fonctionnement du script
         run: python3 -m unittest discover -s tests_trakt_mdblist -v
+
       - name: Synchroniser les visionnages
         env:
           TRAKT_USERNAME: ${{ secrets.TRAKT_USERNAME }}
@@ -42,3 +44,54 @@ jobs:
           else
             python3 sync_trakt_mdblist.py
           fi
+
+      - name: Envoyer un mail en cas d'échec
+        if: failure()
+        timeout-minutes: 2
+        env:
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import smtplib
+          import ssl
+          import sys
+          from email.message import EmailMessage
+
+          for name in ("SMTP_USERNAME", "SMTP_PASSWORD"):
+              if not os.environ.get(name, "").strip():
+                  print(f"Secret absent : {name}")
+                  sys.exit(1)
+
+          message = EmailMessage()
+          message["Subject"] = "Erreur : synchronisation Trakt → MDBList"
+          message["From"] = os.environ["SMTP_USERNAME"]
+          message["To"] = "legay.romain@gmail.com"
+          message.set_content(
+              "La synchronisation Trakt vers MDBList a échoué.\n\n"
+              "Certains éléments ont peut-être été synchronisés avant l'erreur.\n\n"
+              "Consulte le détail de l'exécution ici :\n"
+              + os.environ["RUN_URL"]
+          )
+
+          try:
+              with smtplib.SMTP_SSL(
+                  "smtp.gmail.com",
+                  465,
+                  context=ssl.create_default_context(),
+                  timeout=30,
+              ) as smtp:
+                  smtp.login(
+                      os.environ["SMTP_USERNAME"],
+                      os.environ["SMTP_PASSWORD"],
+                  )
+                  smtp.send_message(message)
+          except Exception as error:
+              print("Échec de l'envoi du mail : " + type(error).__name__)
+              sys.exit(1)
+
+          print("Mail d'erreur envoyé.")
+          PY
