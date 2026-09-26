@@ -137,25 +137,27 @@ def plan(api, kind, items):
     return pending
 
 
-def apply(api, kind, items):
+def apply(api, kind, items, strict=True, unresolved=None):
     verified = 0
     for batch in chunks(items):
-        # Do not automatically retry writes after an ambiguous network failure.
-        # The next run checks the remote state again before writing.
         data, _ = api.call('/sync/watched', body={kind + 's': batch}, retry_safe=False)
         if not isinstance(data, dict) or 'updated' not in data:
             raise SyncError('MDBList: réponse d’écriture inattendue; relancer pour revérifier les statuts.')
-        if data.get('errors') or any(data.get('not_found', {}).values()):
-            raise SyncError(
-                f'MDBList: réponse partielle pour le lot {kind}. '
-                f'Identifiants TMDB envoyés : {[i["ids"]["tmdb"] for i in batch]}. '
-                'Certains peuvent avoir été ajoutés; les autres restent à vérifier.'
-            )
+        if strict and (data.get('errors') or any(data.get('not_found', {}).values())):
+            raise SyncError('MDBList: certains éléments n’ont pas été résolus.')
         found, unknown = states(api, kind, [i['ids']['tmdb'] for i in batch])
-        if unknown or not all(found.values()):
-            raise SyncError('MDBList: écriture non confirmée pour certains éléments; relancer plus tard.')
-        verified += len(batch)
+        remaining = [i['ids']['tmdb'] for i in batch if not found.get(i['ids']['tmdb'], False)]
+        verified += len(batch) - len(remaining)
         print(f'{kind}: {verified}/{len(items)} ajouts confirmés.', flush=True)
+        if remaining:
+            if strict:
+                raise SyncError('MDBList: écriture non confirmée pour certains éléments.')
+            if unresolved is not None:
+                unresolved.extend((kind, item_id) for item_id in remaining)
+            print(f'::warning::{kind}: statuts non confirmés pour les identifiants TMDB '
+                  f'{remaining}. Ces éléments seront retentés au prochain passage.', flush=True)
+        elif data.get('errors'):
+            raise SyncError('MDBList: erreurs signalées malgré des statuts confirmés; vérification nécessaire.')
     return verified
 
 
@@ -176,6 +178,7 @@ def main():
     mdb = API('MDBList', 'https://api.mdblist.com', key=required('MDBLIST_API_KEY'))
     cutoff = datetime.now(timezone.utc).isoformat()
     plans, skipped = {}, 0
+    unresolved, confirmed = [], {}
     # Finish all reads and validation before making any watched-state changes.
     for kind, plural in [('movie', 'movies'), ('episode', 'episodes')]:
         source = read_history(trakt, username, plural, cutoff)
@@ -188,15 +191,22 @@ def main():
     print(mode, flush=True)
     if args.apply:
         for kind, items in plans.items():
-            apply(mdb, kind, items)
+            confirmed[kind] = apply(mdb, kind, items, strict=False, unresolved=unresolved)
     lines = [f'## {mode}', '', *[f'- {kind}: {len(items)} statuts à ajouter' for kind, items in plans.items()],
              f'- Entrées ignorées sans identifiant TMDB : {skipped}']
+    if args.apply:
+        lines.extend(f'- {kind}: {count} ajouts confirmés' for kind, count in confirmed.items())
+    if unresolved:
+        lines.append('- Non synchronisés (type, identifiant TMDB) : ' + str(unresolved))
+    if skipped or unresolved:
+        lines.append('\n**Résultat partiel : les éléments ci-dessus restent non synchronisés.**')
     if os.getenv('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
             summary.write('\n'.join(lines) + '\n')
     if skipped:
-        raise SyncError('Synchronisation incomplète : certaines entrées Trakt n’ont pas d’identifiant TMDB.')
-    print('Terminé.', flush=True)
+        print(f'::warning::{skipped} entrées Trakt ignorées sans identifiant TMDB.', flush=True)
+    print('Terminé avec avertissements : certains éléments restent non synchronisés.'
+          if skipped or unresolved else 'Terminé.', flush=True)
 
 
 if __name__ == '__main__':
