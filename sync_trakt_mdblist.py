@@ -146,7 +146,11 @@ def apply(api, kind, items):
         if not isinstance(data, dict) or 'updated' not in data:
             raise SyncError('MDBList: réponse d’écriture inattendue; relancer pour revérifier les statuts.')
         if data.get('errors') or any(data.get('not_found', {}).values()):
-            raise SyncError('MDBList: certains éléments n’ont pas été résolus. Relancer après vérification.')
+            raise SyncError(
+                f'MDBList: réponse partielle pour le lot {kind}. '
+                f'Identifiants TMDB envoyés : {[i["ids"]["tmdb"] for i in batch]}. '
+                'Certains peuvent avoir été ajoutés; les autres restent à vérifier.'
+            )
         found, unknown = states(api, kind, [i['ids']['tmdb'] for i in batch])
         if unknown or not all(found.values()):
             raise SyncError('MDBList: écriture non confirmée pour certains éléments; relancer plus tard.')
