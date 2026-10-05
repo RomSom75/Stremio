@@ -3,13 +3,12 @@
 
 Ce projet maintient une liste statique MDBList de films ayant réalisé plus d'un million d'entrées en France, auxquels il retire les films de ta liste « vus ». Il peut aussi utiliser une ou plusieurs listes MDBList comme source : elles sont fusionnées, dédoublonnées, puis les films vus sont retirés avant la mise à jour de la liste statique.
 
-Pour utiliser des listes sources, renseigne la variable GitHub Actions `MDBLIST_SOURCE_LISTS` avec des URLs ou chemins séparés par des virgules, des points-virgules ou des retours à la ligne. Quand elle est renseignée, le CNC est désactivé pour cette exécution.
+Pour ajouter d'autres synchronisations en parallèle du CNC, renseigne la variable GitHub Actions `MDBLIST_ADDITIONAL_LISTS` avec un tableau JSON. Chaque entrée définit une liste enfant (`output`) et une ou plusieurs listes parentes (`sources`). La synchronisation CNC reste inchangée.
 
 Exemple pour une liste Halloween vide :
 
 ```text
-MDBLIST_SOURCE_LISTS=https://mdblist.com/lists/sdhb/haloween,https://mdblist.com/lists/spaceace76/halloween-horrors
-MDBLIST_OUTPUT_LIST_ID=<identifiant-ou-chemin-de-la-liste-halloween>
+MDBLIST_ADDITIONAL_LISTS=[{"output":"<identifiant-ou-chemin-de-la-liste-halloween>","sources":["https://mdblist.com/lists/sdhb/haloween","https://mdblist.com/lists/spaceace76/halloween-horrors"]}]
 ```
 
 Le fichier de référence est le jeu de données officiel du [CNC publié sur data.gouv.fr](https://www.data.gouv.fr/datasets/films-ayant-realise-plus-dun-million-dentrees). Il est téléchargé à chaque exécution. Les recherches utilisent l'endpoint officiel [TMDb Search Movie](https://developer.themoviedb.org/reference/search-movie), puis les listes sont lues et modifiées avec l'[API MDBList](https://api.mdblist.com/docs/). MDBList propose bien l'intégration officielle **Stremio Lists** avec rafraîchissement automatique : [Apps & Integrations](https://mdblist.com/apps/).

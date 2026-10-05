@@ -320,12 +320,6 @@ def list_tmdb_ids(payload: Any) -> set[int]:
     return {int(item["id"]) for item in movies if isinstance(item, dict) and item.get("id") is not None}
 
 
-def configured_source_lists() -> list[str]:
-    """Read one or more MDBList URLs/paths from the environment."""
-    raw = os.getenv("MDBLIST_SOURCE_LISTS", "")
-    return [value.strip() for value in re.split(r"[,\n;]+", raw) if value.strip()]
-
-
 def mdblist_source_tmdb_ids(session: requests.Session, key: str, lists: list[str]) -> set[int]:
     ids: set[int] = set()
     for source in lists:
@@ -334,6 +328,23 @@ def mdblist_source_tmdb_ids(session: requests.Session, key: str, lists: list[str
         logging.info("Source MDBList %s: %s film(s)", source, len(source_ids))
         ids.update(source_ids)
     return ids
+
+
+def configured_additional_lists() -> list[dict[str, Any]]:
+    """Read additional source-list to output-list synchronisations from JSON."""
+    raw = os.getenv("MDBLIST_ADDITIONAL_LISTS", "").strip()
+    if not raw:
+        return []
+    try:
+        values = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SyncError("MDBLIST_ADDITIONAL_LISTS must contain valid JSON.") from exc
+    if not isinstance(values, list):
+        raise SyncError("MDBLIST_ADDITIONAL_LISTS must be a JSON array.")
+    for value in values:
+        if not isinstance(value, dict) or not isinstance(value.get("output"), str) or not isinstance(value.get("sources"), list) or not all(isinstance(source, str) for source in value["sources"]):
+            raise SyncError('Each additional list must have the form {"output": "...", "sources": ["..."]}.')
+    return values
 
 
 def mdblist_watched_tmdb_ids(session: requests.Session, key: str, tmdb_ids: set[int]) -> set[int]:
@@ -375,12 +386,7 @@ def main() -> int:
     REPORTS.mkdir(exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     session = requests.Session()
-    source_lists = configured_source_lists()
-    if source_lists:
-        current_update, needs_sync = "", False
-        logging.info("Using %s configurable MDBList source list(s); CNC catalog is disabled for this run.", len(source_lists))
-    else:
-        current_update, needs_sync = check_cnc_update(session)
+    current_update, needs_sync = check_cnc_update(session)
     logging.info("CNC last update: %s | catalog refresh needed: %s", current_update, needs_sync)
     if args.check_update:
         return 0
@@ -401,13 +407,7 @@ def main() -> int:
             raise SyncError("MDBLIST_WATCHED_LIST_ID=7095 is a preset, not a MDBList list. Leave it empty to use your MDBList watchlist, or configure a real list.")
     if watched_id and watched_id == output_id:
         raise SyncError("Watched and output list IDs must be different.")
-    if source_lists:
-        source_ids = mdblist_source_tmdb_ids(session, mdb_key, source_lists)
-        if not source_ids:
-            raise SyncError("Configured MDBList source lists contain no TMDb films.")
-        (REPORTS / "unresolved.json").write_text("[]\n")
-        (REPORTS / "summary.json").write_text(json.dumps({"generated_at": datetime.now(UTC).isoformat(), "source_lists": source_lists, "source_count": len(source_ids), "resolved_count": len(source_ids), "unresolved_count": 0}, ensure_ascii=False, indent=2) + "\n")
-    elif refresh_catalog:
+    if refresh_catalog:
         films = read_cnc(session, os.getenv("CNC_DATASET_URL") or env("CNC_DATASET_URL"))
         overrides = load_overrides()
         resolutions = [resolve_tmdb(session, tmdb_token, film, overrides) for film in films]
@@ -439,10 +439,29 @@ def main() -> int:
         output_list_path = f"/lists/{numeric_list_id(session, mdb_key, output_id)}"
         modify_list(session, mdb_key, output_list_path, "add", additions)
         modify_list(session, mdb_key, output_list_path, "remove", removals)
-        if refresh_catalog and not source_lists:
+        if refresh_catalog:
             write_catalog(current_update, source_ids)
             write_cnc_update(current_update)
         logging.info("MDBList output list updated.")
+    for additional in configured_additional_lists():
+        additional_ids = mdblist_source_tmdb_ids(session, mdb_key, additional["sources"])
+        if not additional_ids:
+            raise SyncError(f"Configured MDBList sources for {additional['output']} contain no TMDb films.")
+        if use_trakt:
+            additional_watched = watched
+        elif watched_id:
+            additional_watched = list_tmdb_ids(mdblist(session, mdb_key, "GET", f"{list_path(watched_id)}/items"))
+        else:
+            additional_watched = mdblist_watched_tmdb_ids(session, mdb_key, additional_ids)
+        additional_output = list_tmdb_ids(mdblist(session, mdb_key, "GET", f"{list_path(additional['output'])}/items"))
+        additional_desired = additional_ids - additional_watched
+        additional_additions = additional_desired - additional_output
+        additional_removals = additional_output - additional_desired
+        logging.info("Additional list %s: desired=%s | add=%s | remove=%s", additional["output"], len(additional_desired), len(additional_additions), len(additional_removals))
+        if not args.dry_run:
+            additional_path = f"/lists/{numeric_list_id(session, mdb_key, additional['output'])}"
+            modify_list(session, mdb_key, additional_path, "add", additional_additions)
+            modify_list(session, mdb_key, additional_path, "remove", additional_removals)
     return 0
 
 
