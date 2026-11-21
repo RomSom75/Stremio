@@ -193,6 +193,21 @@ class SyncTests(unittest.TestCase):
                          ({'updated': {'movies': 1}}, {}), response([(1, True)])])
         self.assertEqual(apply(retry, 'movie', plan(retry, 'movie', [item()])), 1)
 
+    def test_long_quota_wait_reports_resume_time_without_leaking_credentials(self):
+        api = API('MDBList', 'https://api.mdblist.com', key='secret-value')
+        error = HTTPError('https://api.mdblist.com/?apikey=secret-value', 429,
+                          'secret-value', {'Retry-After': '7200'}, None)
+        with patch('sync_trakt_mdblist.urlopen', side_effect=error) as request, \
+                patch('sync_trakt_mdblist.time.time', return_value=0), \
+                patch('sync_trakt_mdblist.time.sleep') as sleep:
+            with self.assertRaises(SyncError) as caught:
+                api.call('/sync/state/movie/tmdb', body={'ids': [1]})
+        self.assertIn('1970-01-01T02:00:00+00:00', str(caught.exception))
+        self.assertIn('HTTP 429', str(caught.exception))
+        self.assertNotIn('secret-value', str(caught.exception))
+        request.assert_called_once()
+        sleep.assert_not_called()
+
     def test_write_network_error_is_not_retried_or_leaked(self):
         api = API('MDBList', 'https://api.mdblist.com', key='secret-value')
         error = HTTPError('https://api.mdblist.com/?apikey=secret-value', 503, 'secret-value', {}, None)

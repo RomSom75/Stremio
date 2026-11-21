@@ -39,7 +39,8 @@ class API:
                     except ValueError:
                         delay = 2 ** (attempt + 1)
                     if delay > 60:
-                        raise SyncError(f'{self.name}: quota temporairement atteint. Relancer plus tard.') from None
+                        resume_at = datetime.fromtimestamp(time.time() + delay, timezone.utc).isoformat()
+                        raise SyncError(f'{self.name}: limite HTTP {exc.code}; reprise possible après {resume_at} (UTC).') from None
                     time.sleep(max(1, delay))
                     continue
                 raise SyncError(f'{self.name}: erreur HTTP {exc.code}. Vérifier les accès et quotas.') from None
