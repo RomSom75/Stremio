@@ -14,6 +14,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: cnc-mdblist-sync
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -33,16 +37,15 @@ jobs:
           echo "changed=$(jq -r '.changed' reports/cnc-update.json)" >> "$GITHUB_OUTPUT"
           echo "needs_sync=$(jq -r '.needs_sync' reports/cnc-update.json)" >> "$GITHUB_OUTPUT"
           echo "current_update=$(jq -r '.current_update' reports/cnc-update.json)" >> "$GITHUB_OUTPUT"
+      - name: Vérifier le fonctionnement du script
+        run: python -m unittest discover -s tests_cnc -v
       - name: Synchronise list
-        if: success()
+        if: success() && steps.cnc.outputs.needs_sync == 'true'
         env:
           TMDB_API_TOKEN: ${{ secrets.TMDB_API_TOKEN }}
           MDBLIST_API_KEY: ${{ secrets.MDBLIST_API_KEY }}
-          MDBLIST_WATCHED_LIST_ID: ${{ secrets.MDBLIST_WATCHED_LIST_ID }}
           MDBLIST_OUTPUT_LIST_ID: ${{ secrets.MDBLIST_OUTPUT_LIST_ID }}
-          MDBLIST_ADDITIONAL_LISTS: ${{ vars.MDBLIST_ADDITIONAL_LISTS }}
           CNC_DATASET_URL: https://www.data.gouv.fr/api/1/datasets/r/8e92a471-00a9-445c-ad41-56fe484605b0
-          FAIL_ON_UNRESOLVED: "true"
         run: >-
           python sync.py
           ${{ inputs.dry_run == true && '--dry-run' || '' }}
@@ -83,11 +86,11 @@ jobs:
             La liste MDBList a été synchronisée avec succès.
             Date de mise à jour CNC : ${{ steps.cnc.outputs.current_update }}
       - name: Commit CNC update state
-        if: success() && steps.cnc.outputs.changed == 'true' && inputs.dry_run != true
+        if: success() && steps.cnc.outputs.needs_sync == 'true' && inputs.dry_run != true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add cnc-state.json
+          git add cnc-state.json cnc-catalog.json
           git diff --cached --quiet || git commit -m "chore: record CNC dataset update"
           git push
       - name: Upload review report

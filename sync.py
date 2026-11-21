@@ -27,7 +27,6 @@ CATALOG_FILE = ROOT / "cnc-catalog.json"
 DEFAULT_CNC_METADATA_URL = "https://www.data.gouv.fr/api/1/datasets/films-ayant-realise-plus-dun-million-dentrees"
 MDB = "https://api.mdblist.com"
 TMDB = "https://api.themoviedb.org/3"
-TRAKT = "https://api.trakt.tv"
 
 
 class SyncError(RuntimeError):
@@ -186,7 +185,7 @@ def previous_cnc_update() -> str:
 
 
 def write_cnc_update(value: str) -> None:
-    STATE_FILE.write_text(json.dumps({"last_update": value}, indent=2) + "\n")
+    STATE_FILE.write_text(json.dumps({"last_update": value, "include_watched": True}, indent=2) + "\n")
 
 
 def load_catalog() -> set[int] | None:
@@ -207,7 +206,9 @@ def check_cnc_update(session: requests.Session) -> tuple[str, bool]:
     current = cnc_last_update(session, os.getenv("CNC_METADATA_URL") or DEFAULT_CNC_METADATA_URL)
     previous = previous_cnc_update()
     changed = current != previous
-    needs_sync = changed or not CATALOG_FILE.exists()
+    state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+    migrated = isinstance(state, dict) and state.get("include_watched") is True
+    needs_sync = changed or not CATALOG_FILE.exists() or not migrated
     (REPORTS / "cnc-update.json").write_text(
         json.dumps({"current_update": current, "previous_update": previous, "changed": changed, "needs_sync": needs_sync}, indent=2) + "\n"
     )
@@ -263,32 +264,6 @@ def mdblist(session: requests.Session, key: str, method: str, path: str, **kwarg
     return request(session, method, f"{MDB}{path}", params=params, **kwargs)
 
 
-def trakt_tmdb_ids(session: requests.Session, client_id: str, username: str, list_slug: str = "") -> set[int]:
-    headers = {"trakt-api-version": "2", "trakt-api-key": client_id}
-    ids: set[int] = set()
-    page = 1
-    endpoint = f"/users/{username}/lists/{list_slug}/items/movies" if list_slug else f"/users/{username}/watched/movies"
-    while True:
-        payload = request(
-            session,
-            "GET",
-            f"{TRAKT}{endpoint}",
-            headers=headers,
-            params={"page": page, "limit": 1000},
-        )
-        items = payload if isinstance(payload, list) else []
-        ids.update(
-            int(item["movie"]["ids"]["tmdb"])
-            for item in items
-            if isinstance(item, dict)
-            and isinstance(item.get("movie"), dict)
-            and item["movie"].get("ids", {}).get("tmdb") is not None
-        )
-        if len(items) < 1000:
-            return ids
-        page += 1
-
-
 def list_path(value: str) -> str:
     value = value.strip().rstrip("/")
     value = re.sub(r"^https?://mdblist\.com/lists/", "", value, flags=re.IGNORECASE)
@@ -320,55 +295,6 @@ def list_tmdb_ids(payload: Any) -> set[int]:
     return {int(item["id"]) for item in movies if isinstance(item, dict) and item.get("id") is not None}
 
 
-def mdblist_source_tmdb_ids(session: requests.Session, key: str, lists: list[str]) -> set[int]:
-    ids: set[int] = set()
-    for source in lists:
-        payload = mdblist(session, key, "GET", f"{list_path(source)}/items")
-        source_ids = list_tmdb_ids(payload)
-        logging.info("Source MDBList %s: %s film(s)", source, len(source_ids))
-        ids.update(source_ids)
-    return ids
-
-
-def configured_additional_lists() -> list[dict[str, Any]]:
-    """Read additional source-list to output-list synchronisations from JSON."""
-    raw = os.getenv("MDBLIST_ADDITIONAL_LISTS", "").strip()
-    if not raw:
-        return []
-    try:
-        values = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise SyncError("MDBLIST_ADDITIONAL_LISTS must contain valid JSON.") from exc
-    if not isinstance(values, list):
-        raise SyncError("MDBLIST_ADDITIONAL_LISTS must be a JSON array.")
-    for value in values:
-        if not isinstance(value, dict) or not isinstance(value.get("output"), str) or not isinstance(value.get("sources"), list) or not all(isinstance(source, str) for source in value["sources"]):
-            raise SyncError('Each additional list must have the form {"output": "...", "sources": ["..."]}.')
-    return values
-
-
-def mdblist_watched_tmdb_ids(session: requests.Session, key: str, tmdb_ids: set[int]) -> set[int]:
-    ids: set[int] = set()
-    sorted_ids = sorted(tmdb_ids)
-    for start in range(0, len(sorted_ids), 100):
-        payload = mdblist(
-            session,
-            key,
-            "POST",
-            "/sync/state/movie/tmdb",
-            json={"ids": sorted_ids[start : start + 100]},
-        )
-        movies = payload.get("items", []) if isinstance(payload, dict) else []
-        ids.update(
-            int(item["id"])
-            for item in movies
-            if isinstance(item, dict)
-            and item.get("id") is not None
-            and item.get("watched") is True
-        )
-    return ids
-
-
 def modify_list(session: requests.Session, key: str, list_id: str, action: str, ids: set[int]) -> None:
     # Official MDBList static-list body: movie identifiers under the movies array.
     for batch in (list(sorted(ids))[i : i + 100] for i in range(0, len(ids), 100)):
@@ -387,27 +313,17 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     session = requests.Session()
     current_update, needs_sync = check_cnc_update(session)
-    logging.info("CNC last update: %s | catalog refresh needed: %s", current_update, needs_sync)
+    logging.info("CNC last update: %s | list sync needed: %s", current_update, needs_sync)
     if args.check_update:
         return 0
     if not needs_sync and not args.force:
-        logging.info("CNC unchanged; reusing resolved catalog and checking watched status.")
-    refresh_catalog = needs_sync or args.force
-    tmdb_token, mdb_key = env("TMDB_API_TOKEN"), env("MDBLIST_API_KEY")
-    watched_id = env_any("MDBLIST_WATCHED_LIST_ID", required=False)
+        logging.info("CNC unchanged; no MDBList update needed.")
+        return 0
+    refresh_catalog = current_update != previous_cnc_update() or not CATALOG_FILE.exists() or args.force
+    mdb_key = env("MDBLIST_API_KEY")
     output_id = env_any("MDBLIST_OUTPUT_LIST_ID", "LIST_ID")
-    trakt_client_id = env_any("TRAKT_CLIENT_ID", required=False)
-    trakt_username = os.getenv("TRAKT_USERNAME", "").strip()
-    trakt_list_slug = os.getenv("TRAKT_LIST_SLUG", "").strip()
-    use_trakt = any((trakt_client_id, trakt_username, trakt_list_slug))
-    if use_trakt and not all((trakt_client_id, trakt_username)):
-        raise SyncError("TRAKT_CLIENT_ID and TRAKT_USERNAME must be set together.")
-    if not use_trakt and watched_id:
-        if watched_id == "7095":
-            raise SyncError("MDBLIST_WATCHED_LIST_ID=7095 is a preset, not a MDBList list. Leave it empty to use your MDBList watchlist, or configure a real list.")
-    if watched_id and watched_id == output_id:
-        raise SyncError("Watched and output list IDs must be different.")
     if refresh_catalog:
+        tmdb_token = env("TMDB_API_TOKEN")
         films = read_cnc(session, os.getenv("CNC_DATASET_URL") or env("CNC_DATASET_URL"))
         overrides = load_overrides()
         resolutions = [resolve_tmdb(session, tmdb_token, film, overrides) for film in films]
@@ -423,14 +339,8 @@ def main() -> int:
         if source_ids is None:
             raise SyncError("Resolved CNC catalog is missing; run once with --force.")
         (REPORTS / "unresolved.json").write_text("[]\n")
-    if use_trakt:
-        watched = trakt_tmdb_ids(session, trakt_client_id, trakt_username, trakt_list_slug)
-    elif watched_id:
-        watched = list_tmdb_ids(mdblist(session, mdb_key, "GET", f"{list_path(watched_id)}/items"))
-    else:
-        watched = mdblist_watched_tmdb_ids(session, mdb_key, source_ids)
     output = list_tmdb_ids(mdblist(session, mdb_key, "GET", f"{list_path(output_id)}/items"))
-    desired = source_ids - watched
+    desired = source_ids
     additions, removals = desired - output, output - desired
     changes = {"add_tmdb_ids": sorted(additions), "remove_tmdb_ids": sorted(removals), "desired_count": len(desired), "fingerprint": hashlib.sha256(",".join(map(str, sorted(desired))).encode()).hexdigest()}
     (REPORTS / "changes.json").write_text(json.dumps(changes, indent=2))
@@ -441,27 +351,8 @@ def main() -> int:
         modify_list(session, mdb_key, output_list_path, "remove", removals)
         if refresh_catalog:
             write_catalog(current_update, source_ids)
-            write_cnc_update(current_update)
+        write_cnc_update(current_update)
         logging.info("MDBList output list updated.")
-    for additional in configured_additional_lists():
-        additional_ids = mdblist_source_tmdb_ids(session, mdb_key, additional["sources"])
-        if not additional_ids:
-            raise SyncError(f"Configured MDBList sources for {additional['output']} contain no TMDb films.")
-        if use_trakt:
-            additional_watched = watched
-        elif watched_id:
-            additional_watched = list_tmdb_ids(mdblist(session, mdb_key, "GET", f"{list_path(watched_id)}/items"))
-        else:
-            additional_watched = mdblist_watched_tmdb_ids(session, mdb_key, additional_ids)
-        additional_output = list_tmdb_ids(mdblist(session, mdb_key, "GET", f"{list_path(additional['output'])}/items"))
-        additional_desired = additional_ids - additional_watched
-        additional_additions = additional_desired - additional_output
-        additional_removals = additional_output - additional_desired
-        logging.info("Additional list %s: desired=%s | add=%s | remove=%s", additional["output"], len(additional_desired), len(additional_additions), len(additional_removals))
-        if not args.dry_run:
-            additional_path = f"/lists/{numeric_list_id(session, mdb_key, additional['output'])}"
-            modify_list(session, mdb_key, additional_path, "add", additional_additions)
-            modify_list(session, mdb_key, additional_path, "remove", additional_removals)
     return 0
 
 
