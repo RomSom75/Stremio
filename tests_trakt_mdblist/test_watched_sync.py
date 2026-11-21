@@ -15,8 +15,19 @@ class FakeAPI:
         return next(self.replies)
 
 
+DATE = '2026-09-24T00:00:00Z'
+OLD = '2026-09-20T00:00:00Z'
+NEW = '2026-09-25T00:00:00Z'
+
+
+def item(key=1, date=DATE):
+    return {'ids': {'tmdb': key}, 'watched_at': date}
+
+
 def response(rows, missing=None):
-    return {'items': [{'id': k, 'watched': v} for k, v in rows], 'not_found': missing or []}, {}
+    return {'items': [dict(id=row[0], watched=row[1],
+                           last_watched_at=row[2] if len(row) > 2 else (DATE if row[1] else None))
+                      for row in rows], 'not_found': missing or []}, {}
 
 
 class SyncTests(unittest.TestCase):
@@ -45,14 +56,14 @@ class SyncTests(unittest.TestCase):
             states(FakeAPI([response([(1, True)])]), 'movie', [1, 2])
 
     def test_dry_plan_does_not_write_and_keeps_only_missing(self):
-        items = [{'ids': {'tmdb': n}} for n in [1, 2, 3]]
+        items = [item(n) for n in [1, 2, 3]]
         api = FakeAPI([response([(1, True), (2, False)], [3])])
         self.assertEqual(plan(api, 'movie', items), items[1:])
         self.assertTrue(all('/sync/state/' in call[0] for call in api.calls))
 
     def test_second_run_writes_nothing(self):
         items = [{'ids': {'tmdb': 1}, 'watched_at': '2026-09-24T00:00:00Z'}]
-        api = FakeAPI([response([(1, False)]), ({'updated': {'movies': 1}, 'not_found': {}}, {}),
+        api = FakeAPI([response([(1, False)]), response([(1, False)]), ({'updated': {'movies': 1}, 'not_found': {}}, {}),
                        response([(1, True)]), response([(1, True)])])
         pending = plan(api, 'movie', items)
         self.assertEqual(apply(api, 'movie', pending), 1)
@@ -61,14 +72,94 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(len(writes), 1)
 
     def test_unresolved_write_is_not_reported_successful(self):
-        api = FakeAPI([({'updated': {}, 'not_found': {'episodes': [55]}}, {})])
+        api = FakeAPI([response([], [55]), ({'updated': {}, 'not_found': {'episodes': [55]}}, {})])
         with self.assertRaises(SyncError):
-            apply(api, 'episode', [{'ids': {'tmdb': 55}}])
+            apply(api, 'episode', [item(55)])
 
     def test_unconfirmed_write_stops(self):
-        api = FakeAPI([({'updated': {}}, {}), response([(1, False)])])
+        api = FakeAPI([response([(1, False)]), ({'updated': {}}, {}), response([(1, False)])])
         with self.assertRaises(SyncError):
-            apply(api, 'movie', [{'ids': {'tmdb': 1}}])
+            apply(api, 'movie', [item()])
+
+    def test_plan_includes_older_newer_and_missing_dates(self):
+        items = [item(n) for n in [1, 2, 3, 4]]
+        api = FakeAPI([response([(1, True, OLD), (2, True, NEW), (3, True, None), (4, True, DATE)])])
+        self.assertEqual(plan(api, 'movie', items), items[:3])
+        self.assertEqual(len(api.calls), 1)
+        self.assertIn('/sync/state/', api.calls[0][0])
+
+    def test_equivalent_timezones_and_fractional_format_do_not_write(self):
+        api = FakeAPI([response([(1, True, '2026-09-24T02:00:00.000+02:00')])])
+        self.assertEqual(plan(api, 'episode', [item()]), [])
+
+    def test_invalid_destination_date_stops_before_writes(self):
+        for date in ['not-a-date', '2026-09-24T00:00:00']:
+            with self.subTest(date=date), self.assertRaises(SyncError):
+                plan(FakeAPI([response([(1, True, date)])]), 'movie', [item()])
+
+    def test_normalize_compares_fractional_seconds_as_instants(self):
+        rows = [{'movie': {'ids': {'tmdb': 1}}, 'watched_at': date}
+                for date in [DATE, '2026-09-24T00:00:00.5Z']]
+        self.assertEqual(normalize(rows, 'movie')[0][0]['watched_at'], '2026-09-24T00:00:00.500000+00:00')
+
+    def test_newer_trakt_date_updates_without_reset(self):
+        for kind in ['movie', 'episode']:
+            with self.subTest(kind=kind):
+                api = FakeAPI([response([(1, True, OLD)]), ({'updated': {kind + 's': 1}}, {}),
+                               response([(1, True, DATE)])])
+                self.assertEqual(apply(api, kind, [item()]), 1)
+                self.assertEqual(api.calls[1], ('/sync/watched', None, {kind + 's': [item()]}))
+
+    def test_older_trakt_date_resets_only_affected_item_before_write(self):
+        for kind in ['movie', 'episode']:
+            with self.subTest(kind=kind):
+                api = FakeAPI([response([(1, True, NEW), (2, True, OLD)]),
+                               ({'deleted': {kind + 's': 1}}, {}), response([(1, False)]),
+                               ({'updated': {kind + 's': 2}}, {}), response([(1, True), (2, True)])])
+                self.assertEqual(apply(api, kind, [item(1), item(2)]), 2)
+                self.assertEqual(api.calls[1], ('/sync/watched/remove', None,
+                                                {kind + 's': [{'ids': {'tmdb': 1}}]}))
+                self.assertEqual(api.calls[3][2], {kind + 's': [item(1), item(2)]})
+                self.assertFalse(any('history' in call[0] for call in api.calls))
+
+    def test_date_still_different_after_write_is_not_success(self):
+        api = FakeAPI([response([(1, True, OLD)]), ({'updated': {'movies': 1}}, {}),
+                       response([(1, True, OLD)])])
+        with self.assertRaises(SyncError):
+            apply(api, 'movie', [item()])
+
+    def test_unconfirmed_date_is_reported_for_retry_in_scheduled_mode(self):
+        unresolved = []
+        api = FakeAPI([response([(1, True, OLD)]), ({'updated': {'movies': 1}}, {}),
+                       response([(1, True, OLD)])])
+        self.assertEqual(apply(api, 'movie', [item()], strict=False, unresolved=unresolved), 0)
+        self.assertEqual(unresolved, [('movie', 1)])
+
+    def test_concurrent_sync_already_aligned_date_skips_write(self):
+        api = FakeAPI([response([(1, True)])])
+        self.assertEqual(apply(api, 'movie', [item()]), 1)
+        self.assertEqual(len(api.calls), 1)
+
+    def test_unconfirmed_reset_stops_before_readding(self):
+        api = FakeAPI([response([(1, True, NEW)]), ({'deleted': {'movies': 0}}, {}),
+                       response([(1, True, NEW)])])
+        with self.assertRaises(SyncError):
+            apply(api, 'movie', [item()])
+        self.assertFalse(any(call[0] == '/sync/watched' for call in api.calls))
+
+    def test_interrupted_reset_is_restored_on_next_run(self):
+        class InterruptedAPI(FakeAPI):
+            def call(self, path, params=None, body=None, **kwargs):
+                if path == '/sync/watched':
+                    raise SyncError('Connection lost after resetting status')
+                return super().call(path, params, body, **kwargs)
+        api = InterruptedAPI([response([(1, True, NEW)]), ({'deleted': {'movies': 1}}, {}),
+                              response([(1, False)])])
+        with self.assertRaises(SyncError):
+            apply(api, 'movie', [item()])
+        retry = FakeAPI([response([(1, False)]), response([(1, False)]),
+                         ({'updated': {'movies': 1}}, {}), response([(1, True)])])
+        self.assertEqual(apply(retry, 'movie', plan(retry, 'movie', [item()])), 1)
 
     def test_write_network_error_is_not_retried_or_leaked(self):
         api = API('MDBList', 'https://api.mdblist.com', key='secret-value')

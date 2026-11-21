@@ -91,11 +91,13 @@ Les fichiers `.env`, l’environnement local et les rapports sont exclus de Git 
 
 ## Historique Trakt → MDBList
 
-Le script indépendant [sync_trakt_mdblist.py](sync_trakt_mdblist.py) synchronise les films et épisodes vus depuis Trakt vers MDBList. Il ajoute les statuts manquants en conservant la date de visionnage la plus récente. Il ne retire aucun film de la liste CNC.
+Le script indépendant [sync_trakt_mdblist.py](sync_trakt_mdblist.py) synchronise les films et épisodes vus depuis Trakt vers MDBList. Trakt fait référence : il ajoute les statuts manquants et corrige les dates différentes, même pour les titres déjà vus dans MDBList. Il utilise le dernier visionnage Trakt de chaque film ou épisode, y compris si cette date est plus ancienne que celle de MDBList. Les dates sont comparées en UTC pour éviter les faux écarts de fuseau horaire. Il ne retire aucun film de la liste CNC.
 
 Pour l’utiliser, configure les secrets `TRAKT_USERNAME`, `TRAKT_CLIENT_ID` et `MDBLIST_API_KEY`. Pour activer son exécution quotidienne à **03:23, heure de Paris**, définis la variable GitHub Actions `TRAKT_SYNC_ENABLED` sur `true`.
 
-Un lancement manuel depuis **Actions → Trakt vers MDBList → Run workflow** effectue une simulation par défaut. Coche `apply` pour appliquer les ajouts. Les exécutions planifiées appliquent les ajouts automatiquement. Un email est prévu en cas d’échec.
+Un lancement manuel depuis **Actions → Trakt vers MDBList → Run workflow** effectue une simulation par défaut. Coche `apply` pour appliquer les ajouts et corrections de dates. Les exécutions planifiées les appliquent automatiquement. Un email est prévu en cas d’échec.
+
+Après chaque écriture, le script vérifie le statut **et la date** renvoyés par MDBList. Les titres déjà alignés ne sont pas réécrits. Pour remplacer une date MDBList plus récente par celle de Trakt, il remet d’abord à zéro le statut vu du film ou de l’épisode concerné, puis le rétablit avec la date Trakt, sans demander la suppression des visionnages enregistrés. Si l’exécution s’interrompt entre ces deux étapes, relance la tâche pour rétablir le statut et terminer la correction. Les titres absents de l’historique Trakt ne sont pas modifiés.
 
 Le workflow manuel [recuperer-cle.yml](.github/workflows/recuperer-cle.yml) permet également d’envoyer la clé MDBList par email à l’adresse définie dans ce fichier.
 

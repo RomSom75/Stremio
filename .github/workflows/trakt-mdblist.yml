@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       apply:
-        description: 'Appliquer les ajouts dans MDBList (décoché = simulation)'
+        description: 'Synchroniser les statuts et dates dans MDBList (décoché = simulation)'
         type: boolean
         default: false
 
@@ -72,7 +72,7 @@ jobs:
           message["To"] = "legay.romain@gmail.com"
           message.set_content(
               "La synchronisation Trakt vers MDBList a échoué.\n\n"
-              "Certains éléments ont peut-être été synchronisés avant l'erreur.\n\n"
+              "Certains statuts ont pu être modifiés avant l'erreur. Relance la tâche pour terminer la synchronisation.\n\n"
               "Consulte le détail de l'exécution ici :\n"
               + os.environ["RUN_URL"]
           )

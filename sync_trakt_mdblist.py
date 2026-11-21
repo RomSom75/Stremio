@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-way watched-status sync. Python standard library only."""
+"""One-way watched-status and latest-date sync from Trakt. Standard library only."""
 import argparse
 import json
 import os
@@ -78,6 +78,17 @@ def read_history(api, username, media, cutoff):
     raise SyncError('Trakt: trop de pages; synchronisation arrêtée.')
 
 
+def watched_date(value, service):
+    """Compare instants, so UTC offsets and fractional formatting do not cause writes."""
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            raise ValueError
+        return parsed.astimezone(timezone.utc)
+    except (AttributeError, TypeError, ValueError):
+        raise SyncError(f'{service}: date de visionnage invalide.') from None
+
+
 def normalize(rows, kind):
     """Keep one latest watch per TMDB movie/episode, never a whole show."""
     items, skipped = {}, 0
@@ -91,16 +102,9 @@ def normalize(rows, kind):
         if not isinstance(tmdb, int) or isinstance(tmdb, bool) or tmdb <= 0:
             skipped += 1
             continue
-        date = row.get('watched_at')
-        try:
-            parsed = datetime.fromisoformat(date.replace('Z', '+00:00'))
-            if parsed.tzinfo is None:
-                raise ValueError
-        except (AttributeError, TypeError, ValueError):
-            raise SyncError('Trakt: date de visionnage invalide.') from None
-        canonical = parsed.astimezone(timezone.utc).isoformat()
-        if tmdb not in items or canonical > items[tmdb]['watched_at']:
-            items[tmdb] = {'ids': {'tmdb': tmdb}, 'watched_at': canonical}
+        parsed = watched_date(row.get('watched_at'), 'Trakt')
+        if tmdb not in items or parsed > watched_date(items[tmdb]['watched_at'], 'Trakt'):
+            items[tmdb] = {'ids': {'tmdb': tmdb}, 'watched_at': parsed.isoformat()}
     return list(items.values()), skipped
 
 
@@ -118,7 +122,11 @@ def states(api, kind, ids):
             raise SyncError('MDBList: identifiant invalide.') from None
         if key not in ids or key in found:
             raise SyncError('MDBList: identifiants incohérents.')
-        found[key] = row['watched']
+        date = row.get('last_watched_at')
+        found[key] = {
+            'watched': row['watched'],
+            'last_watched_at': watched_date(date, 'MDBList') if date is not None else None,
+        }
     missing = data.get('not_found', [])
     try:
         unknown = {int(item) for item in missing}
@@ -129,35 +137,61 @@ def states(api, kind, ids):
     return found, unknown
 
 
+def matches(state, item):
+    return bool(state and state['watched']
+                and state['last_watched_at'] == watched_date(item['watched_at'], 'Trakt'))
+
+
 def plan(api, kind, items):
     pending = []
     for batch in chunks(items):
         found, _ = states(api, kind, [i['ids']['tmdb'] for i in batch])
-        pending.extend(i for i in batch if not found.get(i['ids']['tmdb'], False))
+        pending.extend(i for i in batch if not matches(found.get(i['ids']['tmdb']), i))
     return pending
 
 
 def apply(api, kind, items, strict=True, unresolved=None):
     verified = 0
     for batch in chunks(items):
-        data, _ = api.call('/sync/watched', body={kind + 's': batch}, retry_safe=False)
-        if not isinstance(data, dict) or 'updated' not in data:
-            raise SyncError('MDBList: réponse d’écriture inattendue; relancer pour revérifier les statuts.')
-        if strict and (data.get('errors') or any(data.get('not_found', {}).values())):
-            raise SyncError('MDBList: certains éléments n’ont pas été résolus.')
-        found, unknown = states(api, kind, [i['ids']['tmdb'] for i in batch])
-        remaining = [i['ids']['tmdb'] for i in batch if not found.get(i['ids']['tmdb'], False)]
+        # Re-read before writing: a concurrent sync may already have aligned a date.
+        found, _ = states(api, kind, [i['ids']['tmdb'] for i in batch])
+        pending = [i for i in batch if not matches(found.get(i['ids']['tmdb']), i)]
+        # MDBList ignores backdated writes while a newer watched status exists.
+        # Reset only that status, never delete the play history or a whole show.
+        reset = []
+        for item in pending:
+            current = found.get(item['ids']['tmdb'])
+            if (current and current['watched'] and current['last_watched_at'] is not None
+                    and current['last_watched_at'] > watched_date(item['watched_at'], 'Trakt')):
+                reset.append({'ids': item['ids']})
+        if reset:
+            data, _ = api.call('/sync/watched/remove', body={kind + 's': reset}, retry_safe=False)
+            if not isinstance(data, dict) or not isinstance(data.get('deleted'), dict) or data.get('errors'):
+                raise SyncError('MDBList: remise à zéro du statut non confirmée; relancer la synchronisation.')
+            reset_state, _ = states(api, kind, [i['ids']['tmdb'] for i in reset])
+            if any(i['ids']['tmdb'] not in reset_state or reset_state[i['ids']['tmdb']]['watched'] for i in reset):
+                raise SyncError('MDBList: ancienne date toujours présente; relancer la synchronisation.')
+        if pending:
+            data, _ = api.call('/sync/watched', body={kind + 's': pending}, retry_safe=False)
+            if not isinstance(data, dict) or 'updated' not in data:
+                raise SyncError('MDBList: réponse d’écriture inattendue; relancer pour revérifier les dates.')
+            if strict and (data.get('errors') or any(data.get('not_found', {}).values())):
+                raise SyncError('MDBList: certains éléments n’ont pas été résolus.')
+            found, _ = states(api, kind, [i['ids']['tmdb'] for i in batch])
+        else:
+            data = {}
+        remaining = [i['ids']['tmdb'] for i in batch if not matches(found.get(i['ids']['tmdb']), i)]
         verified += len(batch) - len(remaining)
-        print(f'{kind}: {verified}/{len(items)} ajouts confirmés.', flush=True)
+        print(f'{kind}: {verified}/{len(items)} statuts et dates confirmés.', flush=True)
         if remaining:
             if strict:
-                raise SyncError('MDBList: écriture non confirmée pour certains éléments.')
+                raise SyncError('MDBList: statut ou date de visionnage non confirmé pour certains éléments.')
             if unresolved is not None:
                 unresolved.extend((kind, item_id) for item_id in remaining)
-            print(f'::warning::{kind}: statuts non confirmés pour les identifiants TMDB '
+            print(f'::warning::{kind}: statuts ou dates non confirmés pour les identifiants TMDB '
                   f'{remaining}. Ces éléments seront retentés au prochain passage.', flush=True)
         elif data.get('errors'):
-            raise SyncError('MDBList: erreurs signalées malgré des statuts confirmés; vérification nécessaire.')
+            raise SyncError('MDBList: erreurs signalées malgré des dates confirmées; vérification nécessaire.')
     return verified
 
 
@@ -170,7 +204,7 @@ def required(name):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--apply', action='store_true', help='Écrire les statuts (sinon simulation).')
+    parser.add_argument('--apply', action='store_true', help='Synchroniser les statuts et dates depuis Trakt (sinon simulation).')
     args = parser.parse_args()
     username = required('TRAKT_USERNAME')
     trakt = API('Trakt', 'https://api.trakt.tv', {
@@ -185,17 +219,17 @@ def main():
         items, omitted = normalize(source, kind)
         skipped += omitted
         plans[kind] = plan(mdb, kind, items)
-        print(f'{kind}: {len(items)} éléments uniques; {len(plans[kind])} à ajouter; '
+        print(f'{kind}: {len(items)} éléments uniques; {len(plans[kind])} à ajouter ou corriger; '
               f'{omitted} entrées sans identifiant TMDB.', flush=True)
     mode = 'Synchronisation' if args.apply else 'Simulation sans écriture'
     print(mode, flush=True)
     if args.apply:
         for kind, items in plans.items():
             confirmed[kind] = apply(mdb, kind, items, strict=False, unresolved=unresolved)
-    lines = [f'## {mode}', '', *[f'- {kind}: {len(items)} statuts à ajouter' for kind, items in plans.items()],
+    lines = [f'## {mode}', '', *[f'- {kind}: {len(items)} statuts/dates à ajouter ou corriger' for kind, items in plans.items()],
              f'- Entrées ignorées sans identifiant TMDB : {skipped}']
     if args.apply:
-        lines.extend(f'- {kind}: {count} ajouts confirmés' for kind, count in confirmed.items())
+        lines.extend(f'- {kind}: {count} statuts et dates confirmés' for kind, count in confirmed.items())
     if unresolved:
         lines.append('- Non synchronisés (type, identifiant TMDB) : ' + str(unresolved))
     if skipped or unresolved:
