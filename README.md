@@ -1,70 +1,114 @@
-[README.md](https://github.com/user-attachments/files/31553564/README.md)
-# CNC +1M France → MDBList → Stremio
+# Succès au cinéma en France → MDBList → Stremio
 
-Ce projet maintient une liste statique MDBList de tous les films ayant réalisé plus d'un million d'entrées en France. Les films déjà vus restent dans la liste : le filtrage des visionnages est laissé à MDBList/Stremio. La synchronisation des listes thématiques supplémentaires a été supprimée.
+Ce dépôt maintient une liste MDBList des films ayant réalisé plus d’un million d’entrées en France, à partir des données officielles du CNC. Cette liste peut ensuite être ajoutée comme catalogue dans Stremio.
 
-Le fichier de référence est le jeu de données officiel du [CNC publié sur data.gouv.fr](https://www.data.gouv.fr/datasets/films-ayant-realise-plus-dun-million-dentrees). Il est téléchargé lorsqu’une nouvelle version CNC est détectée, ou avec `--force`. Les recherches utilisent l'endpoint officiel [TMDb Search Movie](https://developer.themoviedb.org/reference/search-movie), puis les listes sont lues et modifiées avec l'[API MDBList](https://api.mdblist.com/docs/). MDBList propose bien l'intégration officielle **Stremio Lists** avec rafraîchissement automatique : [Apps & Integrations](https://mdblist.com/apps/).
+**La liste conserve tous les films, y compris ceux déjà vus.** Le filtrage éventuel des films vus se règle dans MDBList/Stremio. Le script CNC ne consulte plus l’historique de visionnage.
 
-## Installation locale
+## Fonctionnement
+
+1. Chaque jour, le programme vérifie si le CNC a publié une nouvelle version de son jeu de données.
+2. Si la version a changé, il télécharge le fichier Excel et retrouve les films dans TMDb.
+3. Il synchronise la liste MDBList avec le catalogue CNC complet : ajout des films manquants et retrait des films qui ne figurent plus dans la source.
+4. Sans nouvelle version CNC, aucune lecture ou modification de la liste MDBList n’est effectuée.
+
+La première exécution après le changement de fonctionnement effectue une remise à niveau unique pour réintégrer les films précédemment retirés parce qu’ils étaient vus. Elle réutilise le catalogue enregistré si le CNC n’a pas changé.
+
+La synchronisation Halloween et la gestion des listes thématiques supplémentaires ont été supprimées. L’ancienne variable `MDBLIST_ADDITIONAL_LISTS` et l’ancien secret `MDBLIST_WATCHED_LIST_ID` ne sont plus utilisés et peuvent être supprimés des paramètres GitHub.
+
+## Configuration sur GitHub
+
+Crée une liste **statique** dans MDBList, puis renseigne les secrets suivants dans **Settings → Secrets and variables → Actions** :
+
+| Secret | Utilisation |
+| --- | --- |
+| `TMDB_API_TOKEN` | Jeton de lecture TMDb ou clé API v3 pour identifier les films. |
+| `MDBLIST_API_KEY` | Clé API de ton compte MDBList. |
+| `MDBLIST_OUTPUT_LIST_ID` | ID numérique ou chemin `utilisateur/nom-de-liste` de la liste statique à maintenir. |
+| `SMTP_USERNAME` | Compte Gmail utilisé pour les notifications. |
+| `SMTP_PASSWORD` | Mot de passe d’application Gmail. |
+
+Les clés sont disponibles dans les paramètres [TMDb](https://www.themoviedb.org/settings/api) et [MDBList](https://mdblist.com/preferences/). Une URL de preset comme `movies/?preset=7095` ne peut pas servir de liste de sortie.
+
+Le workflow [weekly-sync.yml](.github/workflows/weekly-sync.yml) vérifie le CNC chaque jour à **07:17 UTC**, soit 08:17 en hiver et 09:17 en été à Paris. Il peut aussi être lancé depuis **Actions → Sync CNC million-entry films to MDBList → Run workflow**. Coche `dry_run` pour simuler une mise à jour sans modifier MDBList ni enregistrer le nouvel état. Un lancement manuel conserve la vérification de version : il ne force pas une reconstruction si le CNC n’a pas changé et que la remise à niveau initiale est déjà terminée.
+
+Après une synchronisation réussie, le workflow enregistre automatiquement la date traitée et le catalogue résolu dans le dépôt. Lorsqu’une nouvelle version CNC a été traitée, il envoie un email de confirmation à l’adresse définie dans le workflow.
+
+## Ajouter le catalogue dans Stremio
+
+Ouvre la liste de sortie dans MDBList et utilise l’intégration **Stremio Lists / Add to Stremio**. Le catalogue est ensuite rafraîchi par cette intégration.
+
+Le script n’utilise aucun identifiant Stremio. Ce dépôt gère les listes de films ; il ne fournit pas de vidéos ni de sources de lecture.
+
+## Films non reconnus ou ambigus
+
+Si un film ne peut pas être identifié avec certitude dans TMDb, le programme s’arrête **avant toute modification de MDBList**.
+
+1. Télécharge l’artefact `cnc-sync-report` depuis l’exécution GitHub Actions.
+2. Consulte `unresolved.json` pour trouver les films concernés et les candidats proposés.
+3. Complète [overrides.json](overrides.json) avec la clé du film et l’identifiant TMDb retenu.
+4. Enregistre la correction dans le dépôt et relance le workflow.
+
+Exemple de correspondance manuelle :
+
+```json
+{
+  "titre normalise|2024": 123456
+}
+```
+
+Lors d’une nouvelle version CNC, les films à résoudre sont également envoyés par email. Une ambiguïté bloque toute la mise à jour : aucun catalogue partiel n’est appliqué.
+
+## Utilisation locale
 
 ```bash
-cd cnc-million-stremio
+git clone https://github.com/RomSom75/Stremio.git
+cd Stremio
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-touch .env
 ```
 
-Renseigne ensuite `.env` :
+Crée un fichier `.env` à la racine du dépôt :
 
-- `TMDB_API_TOKEN` : crée un jeton **API Read Access Token** depuis [TMDb → API](https://www.themoviedb.org/settings/api), ou utilise une clé API v3. Le script détecte le format et utilise automatiquement `Authorization: Bearer` pour v4 ou `api_key` pour v3.
-- `MDBLIST_API_KEY` : récupère la clé dans [MDBList Preferences](https://mdblist.com/preferences/).
-- `MDBLIST_OUTPUT_LIST_ID` : l'identifiant numérique, ou le chemin `utilisateur/nom-de-liste`, d'une liste **statique**.
-
-Renseigne aussi `CNC_DATASET_URL` avec l'URL du fichier XLSX CNC (le workflow GitHub Actions la fournit déjà). Pour la liste de sortie, utilise son ID numérique ou le chemin `utilisateur/nom-de-liste` visible dans son URL MDBList. Une URL de preset comme `movies/?preset=7095` n'est pas une liste.
-
-Lance un premier contrôle sans changer quoi que ce soit :
-
-```bash
-python sync.py --dry-run
+```dotenv
+TMDB_API_TOKEN=ton_jeton_tmdb
+MDBLIST_API_KEY=ta_cle_mdblist
+MDBLIST_OUTPUT_LIST_ID=utilisateur/nom-de-liste
+CNC_DATASET_URL=https://www.data.gouv.fr/api/1/datasets/r/8e92a471-00a9-445c-ad41-56fe484605b0
 ```
 
-Si `reports/unresolved.json` n'est pas vide, le programme s'arrête volontairement **avant tout changement MDBList**. Pour valider un candidat, complète `overrides.json` en ajoutant une entrée avec la clé `title normalized|year` affichée dans le rapport et l'ID TMDb choisi. Relance ensuite la vérification. Il n'existe pas de mode partiel : un titre ambigu ou absent bloque toute mise à jour, afin qu'aucun film précédemment présent ne soit retiré silencieusement.
+| Commande | Effet |
+| --- | --- |
+| `python sync.py --check-update` | Vérifie si une synchronisation est nécessaire, sans contacter MDBList. |
+| `python sync.py --dry-run` | Calcule les changements si une synchronisation est nécessaire, sans les appliquer. |
+| `python sync.py` | Met à jour la liste si une synchronisation est nécessaire. |
+| `python sync.py --force --dry-run` | Force la reconstruction du catalogue et simule les changements. |
+| `python sync.py --force` | Force la reconstruction et la synchronisation, même sans nouvelle version CNC. |
 
-Quand le contrôle est propre :
+Les rapports sont enregistrés dans `reports/`. Le fichier `cnc-catalog.json` contient les identifiants TMDb résolus ; `cnc-state.json` conserve la date CNC traitée et le marqueur `include_watched` de la remise à niveau initiale. Le mode simulation ne modifie pas ces deux fichiers.
 
-```bash
-python sync.py
-```
-
-Le script compare le catalogue CNC complet à la liste de sortie, puis ajoute et retire seulement la différence. Aucun historique de visionnage n’est consulté. Les rapports JSON restent sous `reports/`. Utilise `python sync.py --force` pour reconstruire et resynchroniser le catalogue manuellement.
-
-## Automatisation GitHub Actions
-
-Le workflow [`.github/workflows/weekly-sync.yml`](.github/workflows/weekly-sync.yml) vérifie chaque jour à 07:17 UTC la date `last_update` du jeu de données CNC. Si elle change, il reconstruit le catalogue TMDb et met à jour la liste MDBList complète. Sans changement CNC, aucune lecture ou écriture MDBList n'est effectuée.
-
-À la première exécution après cette modification, une remise à niveau réintègre les films déjà vus auparavant retirés, à partir du catalogue en cache si le CNC n'a pas changé. Le marqueur `include_watched` dans `cnc-state.json` permet de n'effectuer cette opération qu'une fois. La date, ce marqueur et le catalogue sont enregistrés après une synchronisation réussie. Le mode `--dry-run` ne les modifie pas.
-
-Dans le dépôt GitHub, ajoute ces secrets dans **Settings → Secrets and variables → Actions** :
-
-- `TMDB_API_TOKEN`
-- `MDBLIST_API_KEY`
-- `MDBLIST_OUTPUT_LIST_ID`
-- `SMTP_USERNAME`
-- `SMTP_PASSWORD` (mot de passe d'application Gmail, pas le mot de passe du compte)
-
-En cas d'ambiguïté, l'exécution échoue sans toucher MDBList, envoie `reports/unresolved.json` à l'adresse email définie et publie `cnc-sync-report` comme artefact téléchargeable. Après une mise à jour CNC réussie, un email de confirmation est également envoyé à cette adresse. Télécharge le rapport, complète `overrides.json`, puis envoie ce fichier dans le dépôt avant de relancer le workflow.
-
-## Stremio
-
-Dans MDBList, ouvre la liste statique de sortie puis utilise son bouton d'intégration **Stremio Lists / Add to Stremio**. L'intégration officielle ajoute ce catalogue à Stremio et le rafraîchit automatiquement. Le script n'a pas besoin des identifiants Stremio et ne reçoit jamais ces données.
-
-## Notes de sûreté
-
-- Le format du XLSX CNC est détecté à partir de ses en-têtes. Si le CNC modifie fortement sa structure, le fichier téléchargé est conservé dans le rapport afin de faciliter l'adaptation.
-- Une correspondance TMDb est acceptée automatiquement lorsqu'une recherche renvoie un seul candidat. Les recherches avec plusieurs candidats, ou sans résultat, sont signalées pour validation humaine.
-- Ne versionne jamais `.env` ni les rapports locaux.
+Les fichiers `.env`, l’environnement local et les rapports sont exclus de Git par `.gitignore`.
 
 ## Historique Trakt → MDBList
 
-Le script indépendant `sync_trakt_mdblist.py` continue de synchroniser les films et épisodes vus depuis Trakt vers MDBList. Il nécessite `TRAKT_USERNAME`, `TRAKT_CLIENT_ID` et `MDBLIST_API_KEY`. Sa tâche planifiée à 03:23, heure de Paris, est activée si la variable GitHub Actions `TRAKT_SYNC_ENABLED` vaut `true`. Cette synchronisation ne retire aucun film de la liste CNC.
+Le script indépendant [sync_trakt_mdblist.py](sync_trakt_mdblist.py) synchronise les films et épisodes vus depuis Trakt vers MDBList. Il ajoute les statuts manquants en conservant la date de visionnage la plus récente. Il ne retire aucun film de la liste CNC.
+
+Pour l’utiliser, configure les secrets `TRAKT_USERNAME`, `TRAKT_CLIENT_ID` et `MDBLIST_API_KEY`. Pour activer son exécution quotidienne à **03:23, heure de Paris**, définis la variable GitHub Actions `TRAKT_SYNC_ENABLED` sur `true`.
+
+Un lancement manuel depuis **Actions → Trakt vers MDBList → Run workflow** effectue une simulation par défaut. Coche `apply` pour appliquer les ajouts. Les exécutions planifiées appliquent les ajouts automatiquement. Un email est prévu en cas d’échec.
+
+Le workflow manuel [recuperer-cle.yml](.github/workflows/recuperer-cle.yml) permet également d’envoyer la clé MDBList par email à l’adresse définie dans ce fichier.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests_cnc -v
+python -m unittest discover -s tests_trakt_mdblist -v
+```
+
+## Sources
+
+- [Jeu de données officiel du CNC sur data.gouv.fr](https://www.data.gouv.fr/datasets/films-ayant-realise-plus-dun-million-dentrees)
+- [Recherche de films TMDb](https://developer.themoviedb.org/reference/search-movie)
+- [API MDBList](https://api.mdblist.com/docs/)
+- [Intégrations MDBList](https://mdblist.com/apps/)
