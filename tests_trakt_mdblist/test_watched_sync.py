@@ -1,4 +1,6 @@
+import io
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -132,13 +134,43 @@ class SyncTests(unittest.TestCase):
         unresolved = []
         api = FakeAPI([response([(1, True, OLD)]), ({'updated': {'movies': 1}}, {}),
                        response([(1, True, OLD)])])
-        self.assertEqual(apply(api, 'movie', [item()], strict=False, unresolved=unresolved), 0)
+        with redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(apply(api, 'movie', [item()], strict=False, unresolved=unresolved), 0)
+        self.assertIn('::warning::movie:', output.getvalue())
         self.assertEqual(unresolved, [('movie', 1)])
 
     def test_concurrent_sync_already_aligned_date_skips_write(self):
         api = FakeAPI([response([(1, True)])])
         self.assertEqual(apply(api, 'movie', [item()]), 1)
         self.assertEqual(len(api.calls), 1)
+
+    def test_reset_is_verified_from_state_instead_of_counter_shape(self):
+        for summary in [{'deleted': 1}, {'deleted': {'movies': 1}},
+                        {'deleted': 1, 'errors': {'movies': [], 'episodes': []}}, {}]:
+            with self.subTest(summary=summary):
+                api = FakeAPI([response([(1, True, NEW)]), (summary, {}), response([(1, False)]),
+                               ({'updated': {'movies': 1}}, {}), response([(1, True)])])
+                self.assertEqual(apply(api, 'movie', [item()]), 1)
+                self.assertEqual(api.calls[2][0], '/sync/state/movie/tmdb')
+
+    def test_reset_with_alternative_counter_still_stops_if_status_unchanged(self):
+        api = FakeAPI([response([(1, True, NEW)]), ({'deleted': 1}, {}), response([(1, True, NEW)])])
+        with self.assertRaises(SyncError):
+            apply(api, 'movie', [item()])
+        self.assertFalse(any(call[0] == '/sync/watched' for call in api.calls))
+
+    def test_empty_error_buckets_do_not_fail_confirmed_write(self):
+        api = FakeAPI([response([(1, False)]),
+                       ({'updated': {'movies': 1}, 'errors': {'movies': [], 'episodes': []},
+                         'not_found': {'movies': [], 'episodes': []}}, {}), response([(1, True)])])
+        self.assertEqual(apply(api, 'movie', [item()]), 1)
+
+    def test_actual_errors_still_fail_even_with_confirmed_date(self):
+        api = FakeAPI([response([(1, False)]),
+                       ({'updated': {'movies': 1}, 'errors': {'movies': [1]}}, {}),
+                       response([(1, True)])])
+        with self.assertRaises(SyncError):
+            apply(api, 'movie', [item()], strict=False)
 
     def test_unconfirmed_reset_stops_before_readding(self):
         api = FakeAPI([response([(1, True, NEW)]), ({'deleted': {'movies': 0}}, {}),

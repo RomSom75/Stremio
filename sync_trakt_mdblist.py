@@ -150,6 +150,13 @@ def plan(api, kind, items):
     return pending
 
 
+def has_errors(value):
+    """Empty per-media buckets do not represent an API error."""
+    if isinstance(value, dict):
+        return any(has_errors(item) for item in value.values())
+    return bool(value)
+
+
 def apply(api, kind, items, strict=True, unresolved=None):
     verified = 0
     for batch in chunks(items):
@@ -166,8 +173,9 @@ def apply(api, kind, items, strict=True, unresolved=None):
                 reset.append({'ids': item['ids']})
         if reset:
             data, _ = api.call('/sync/watched/remove', body={kind + 's': reset}, retry_safe=False)
-            if not isinstance(data, dict) or not isinstance(data.get('deleted'), dict) or data.get('errors'):
-                raise SyncError('MDBList: remise à zéro du statut non confirmée; relancer la synchronisation.')
+            # Summary counters vary; the authoritative check is the item state below.
+            if not isinstance(data, dict):
+                raise SyncError('MDBList: réponse de remise à zéro invalide; relancer la synchronisation.')
             reset_state, _ = states(api, kind, [i['ids']['tmdb'] for i in reset])
             if any(i['ids']['tmdb'] not in reset_state or reset_state[i['ids']['tmdb']]['watched'] for i in reset):
                 raise SyncError('MDBList: ancienne date toujours présente; relancer la synchronisation.')
@@ -175,7 +183,7 @@ def apply(api, kind, items, strict=True, unresolved=None):
             data, _ = api.call('/sync/watched', body={kind + 's': pending}, retry_safe=False)
             if not isinstance(data, dict) or 'updated' not in data:
                 raise SyncError('MDBList: réponse d’écriture inattendue; relancer pour revérifier les dates.')
-            if strict and (data.get('errors') or any(data.get('not_found', {}).values())):
+            if strict and (has_errors(data.get('errors')) or has_errors(data.get('not_found'))):
                 raise SyncError('MDBList: certains éléments n’ont pas été résolus.')
             found, _ = states(api, kind, [i['ids']['tmdb'] for i in batch])
         else:
@@ -190,7 +198,7 @@ def apply(api, kind, items, strict=True, unresolved=None):
                 unresolved.extend((kind, item_id) for item_id in remaining)
             print(f'::warning::{kind}: statuts ou dates non confirmés pour les identifiants TMDB '
                   f'{remaining}. Ces éléments seront retentés au prochain passage.', flush=True)
-        elif data.get('errors'):
+        elif has_errors(data.get('errors')):
             raise SyncError('MDBList: erreurs signalées malgré des dates confirmées; vérification nécessaire.')
     return verified
 
