@@ -143,12 +143,55 @@ def matches(state, item):
                 and state['last_watched_at'] == watched_date(item['watched_at'], 'Trakt'))
 
 
+def watched_snapshot(api, kind):
+    """Read the lightweight watched catalog in pages of 1,000, not 100 IDs."""
+    found, cursors = {}, set()
+    params = {'mediatype': kind, 'extended': 'ids_only', 'limit': 1000}
+    for _ in range(10000):
+        data, headers = api.call('/sync/watched', params=params)
+        if not isinstance(data, dict) or not isinstance(data.get(kind + 's'), list):
+            raise SyncError('MDBList: format du catalogue vu inattendu.')
+        for row in data[kind + 's']:
+            if not isinstance(row, dict):
+                raise SyncError('MDBList: entrée du catalogue vu invalide.')
+            key = row.get('tmdb')
+            # Some MDBList titles have no TMDB mapping; they cannot match Trakt IDs.
+            if key is None:
+                continue
+            if type(key) is not int or key <= 0:
+                raise SyncError('MDBList: identifiant TMDB du catalogue invalide.')
+            date = row.get('last_watched_at')
+            state = {'watched': True,
+                     'last_watched_at': watched_date(date, 'MDBList') if date is not None else None}
+            # Concurrent watches can repeat an item across cursor pages; keep the latest.
+            previous = found.get(key)
+            if (previous is None or previous['last_watched_at'] is None
+                    or (state['last_watched_at'] is not None
+                        and state['last_watched_at'] > previous['last_watched_at'])):
+                found[key] = state
+        pagination = data.get('pagination')
+        if isinstance(pagination, dict) and 'next_cursor' in pagination:
+            cursor = pagination['next_cursor']
+        elif 'x-next-cursor' in headers:
+            cursor = headers['x-next-cursor'] or None
+        else:
+            raise SyncError('MDBList: pagination du catalogue absente; arrêt avant écriture.')
+        if cursor is None or cursor == '':
+            return found
+        if not isinstance(cursor, str) or cursor in cursors:
+            raise SyncError('MDBList: curseur de pagination invalide ou répété.')
+        if not data[kind + 's']:
+            raise SyncError('MDBList: page vide avec une suite; catalogue incomplet.')
+        cursors.add(cursor)
+        params = {**params, 'cursor': cursor}
+    raise SyncError('MDBList: trop de pages dans le catalogue vu.')
+
+
 def plan(api, kind, items):
-    pending = []
-    for batch in chunks(items):
-        found, _ = states(api, kind, [i['ids']['tmdb'] for i in batch])
-        pending.extend(i for i in batch if not matches(found.get(i['ids']['tmdb']), i))
-    return pending
+    if not items:
+        return []
+    found = watched_snapshot(api, kind)
+    return [item for item in items if not matches(found.get(item['ids']['tmdb']), item)]
 
 
 def has_errors(value):

@@ -97,6 +97,8 @@ Pour l’utiliser, configure les secrets `TRAKT_USERNAME`, `TRAKT_CLIENT_ID` et 
 
 Un lancement manuel depuis **Actions → Trakt vers MDBList → Run workflow** effectue une simulation par défaut. Coche `apply` pour appliquer les ajouts et corrections de dates. Les exécutions planifiées les appliquent automatiquement. Un email est prévu en cas d’échec.
 
+Pour préparer les changements, le script lit le catalogue vu MDBList par pages de 1 000 éléments avec `extended=ids_only`, afin de limiter la consommation du quota API. Toutes les pages sont validées avant les écritures.
+
 Après chaque écriture, le script vérifie le statut **et la date** renvoyés par MDBList. Les titres déjà alignés ne sont pas réécrits. Pour remplacer une date MDBList plus récente par celle de Trakt, il remet d’abord à zéro le statut vu du film ou de l’épisode concerné, puis le rétablit avec la date Trakt, sans demander la suppression des visionnages enregistrés. Si l’exécution s’interrompt entre ces deux étapes, relance la tâche pour rétablir le statut et terminer la correction. Les titres absents de l’historique Trakt ne sont pas modifiés.
 
 Le workflow manuel [recuperer-cle.yml](.github/workflows/recuperer-cle.yml) permet également d’envoyer la clé MDBList par email à l’adresse définie dans ce fichier.

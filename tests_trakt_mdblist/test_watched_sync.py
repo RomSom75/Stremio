@@ -4,7 +4,7 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from sync_trakt_mdblist import API, SyncError, apply, normalize, plan, read_history, states
+from sync_trakt_mdblist import API, SyncError, apply, normalize, plan, read_history, states, watched_snapshot
 
 
 class FakeAPI:
@@ -30,6 +30,11 @@ def response(rows, missing=None):
     return {'items': [dict(id=row[0], watched=row[1],
                            last_watched_at=row[2] if len(row) > 2 else (DATE if row[1] else None))
                       for row in rows], 'not_found': missing or []}, {}
+
+
+def snapshot(rows, kind='movie', cursor=None):
+    return {kind + 's': [{'tmdb': row[0], 'last_watched_at': row[1]} for row in rows],
+            'pagination': {'next_cursor': cursor}}, {}
 
 
 class SyncTests(unittest.TestCase):
@@ -59,18 +64,18 @@ class SyncTests(unittest.TestCase):
 
     def test_dry_plan_does_not_write_and_keeps_only_missing(self):
         items = [item(n) for n in [1, 2, 3]]
-        api = FakeAPI([response([(1, True), (2, False)], [3])])
+        api = FakeAPI([snapshot([(1, DATE)])])
         self.assertEqual(plan(api, 'movie', items), items[1:])
-        self.assertTrue(all('/sync/state/' in call[0] for call in api.calls))
+        self.assertTrue(all(call[0] == '/sync/watched' and call[2] is None for call in api.calls))
 
     def test_second_run_writes_nothing(self):
         items = [{'ids': {'tmdb': 1}, 'watched_at': '2026-09-24T00:00:00Z'}]
-        api = FakeAPI([response([(1, False)]), response([(1, False)]), ({'updated': {'movies': 1}, 'not_found': {}}, {}),
-                       response([(1, True)]), response([(1, True)])])
+        api = FakeAPI([snapshot([]), response([(1, False)]), ({'updated': {'movies': 1}, 'not_found': {}}, {}),
+                       response([(1, True)]), snapshot([(1, DATE)])])
         pending = plan(api, 'movie', items)
         self.assertEqual(apply(api, 'movie', pending), 1)
         self.assertEqual(plan(api, 'movie', items), [])
-        writes = [call for call in api.calls if call[0] == '/sync/watched']
+        writes = [call for call in api.calls if call[0] == '/sync/watched' and call[2] is not None]
         self.assertEqual(len(writes), 1)
 
     def test_unresolved_write_is_not_reported_successful(self):
@@ -85,19 +90,19 @@ class SyncTests(unittest.TestCase):
 
     def test_plan_includes_older_newer_and_missing_dates(self):
         items = [item(n) for n in [1, 2, 3, 4]]
-        api = FakeAPI([response([(1, True, OLD), (2, True, NEW), (3, True, None), (4, True, DATE)])])
+        api = FakeAPI([snapshot([(1, OLD), (2, NEW), (3, None), (4, DATE)])])
         self.assertEqual(plan(api, 'movie', items), items[:3])
         self.assertEqual(len(api.calls), 1)
-        self.assertIn('/sync/state/', api.calls[0][0])
+        self.assertEqual(api.calls[0][0], '/sync/watched')
 
     def test_equivalent_timezones_and_fractional_format_do_not_write(self):
-        api = FakeAPI([response([(1, True, '2026-09-24T02:00:00.000+02:00')])])
+        api = FakeAPI([snapshot([(1, '2026-09-24T02:00:00.000+02:00')], kind='episode')])
         self.assertEqual(plan(api, 'episode', [item()]), [])
 
     def test_invalid_destination_date_stops_before_writes(self):
         for date in ['not-a-date', '2026-09-24T00:00:00']:
             with self.subTest(date=date), self.assertRaises(SyncError):
-                plan(FakeAPI([response([(1, True, date)])]), 'movie', [item()])
+                plan(FakeAPI([snapshot([(1, date)])]), 'movie', [item()])
 
     def test_normalize_compares_fractional_seconds_as_instants(self):
         rows = [{'movie': {'ids': {'tmdb': 1}}, 'watched_at': date}
@@ -189,9 +194,52 @@ class SyncTests(unittest.TestCase):
                               response([(1, False)])])
         with self.assertRaises(SyncError):
             apply(api, 'movie', [item()])
-        retry = FakeAPI([response([(1, False)]), response([(1, False)]),
+        retry = FakeAPI([snapshot([]), response([(1, False)]),
                          ({'updated': {'movies': 1}}, {}), response([(1, True)])])
         self.assertEqual(apply(retry, 'movie', plan(retry, 'movie', [item()])), 1)
+
+    def test_bulk_plan_reads_all_cursor_pages_and_compares_dates(self):
+        api = FakeAPI([snapshot([(1, DATE)], cursor='page-two'),
+                       snapshot([(2, OLD), (3, NEW)])])
+        self.assertEqual(plan(api, 'movie', [item(1), item(2), item(3), item(4)]),
+                         [item(2), item(3), item(4)])
+        self.assertEqual(api.calls[1][1]['cursor'], 'page-two')
+        self.assertTrue(all(call[1]['limit'] == 1000 and call[1]['extended'] == 'ids_only'
+                            and call[2] is None for call in api.calls))
+
+    def test_bulk_plan_of_20000_titles_uses_20_reads(self):
+        replies = [snapshot([(n, DATE) for n in range(start, start + 1000)], kind='episode',
+                            cursor=str(start + 1000) if start < 19001 else None)
+                   for start in range(1, 20001, 1000)]
+        api = FakeAPI(replies)
+        self.assertEqual(plan(api, 'episode', [item(n) for n in range(1, 20001)]), [])
+        self.assertEqual(len(api.calls), 20)
+
+    def test_bulk_snapshot_rejects_missing_or_repeated_cursor(self):
+        replies = [({'movies': []}, {})]
+        with self.assertRaises(SyncError):
+            watched_snapshot(FakeAPI(replies), 'movie')
+        api = FakeAPI([snapshot([(1, DATE)], cursor='same'),
+                       snapshot([(2, DATE)], cursor='same')])
+        with self.assertRaises(SyncError):
+            watched_snapshot(api, 'movie')
+
+    def test_bulk_snapshot_accepts_cursor_header_and_empty_catalog(self):
+        api = FakeAPI([({'episodes': [{'tmdb': 1, 'last_watched_at': DATE}]}, {'x-next-cursor': 'next'}),
+                       ({'episodes': []}, {'x-next-cursor': ''})])
+        self.assertTrue(watched_snapshot(api, 'episode')[1]['watched'])
+        self.assertEqual(watched_snapshot(FakeAPI([snapshot([])]), 'movie'), {})
+
+    def test_bulk_snapshot_keeps_latest_duplicate_and_skips_unmapped_ids(self):
+        api = FakeAPI([snapshot([(1, DATE)], cursor='next'),
+                       snapshot([(1, OLD), (None, DATE)])])
+        self.assertEqual(watched_snapshot(api, 'movie')[1]['last_watched_at'].isoformat(),
+                         '2026-09-24T00:00:00+00:00')
+
+    def test_empty_plan_does_not_spend_api_quota(self):
+        api = FakeAPI([])
+        self.assertEqual(plan(api, 'episode', []), [])
+        self.assertEqual(api.calls, [])
 
     def test_long_quota_wait_reports_resume_time_without_leaking_credentials(self):
         api = API('MDBList', 'https://api.mdblist.com', key='secret-value')
