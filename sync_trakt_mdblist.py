@@ -174,8 +174,33 @@ def watched_snapshot(api, kind):
             cursor = pagination['next_cursor']
         elif 'x-next-cursor' in headers:
             cursor = headers['x-next-cursor'] or None
+        elif isinstance(pagination, dict) and all(k in pagination for k in ('total', 'offset', 'limit')):
+            # MDBList can answer the first request in legacy offset mode, with
+            # no cursor at all. Validate and follow the explicit page metadata.
+            total, offset, limit = (pagination[k] for k in ('total', 'offset', 'limit'))
+            rows = data[kind + 's']
+            if (any(type(value) is not int for value in (total, offset, limit))
+                    or total < 0 or limit <= 0 or offset != params.get('offset', 0)
+                    or offset < 0 or offset > total or len(rows) > limit):
+                raise SyncError('MDBList: pagination par position invalide; arrêt avant écriture.')
+            next_offset = offset + len(rows)
+            if next_offset >= total:
+                return found
+            if not rows or 'cursor' in params:
+                raise SyncError('MDBList: catalogue incomplet ou mode de pagination incohérent.')
+            params = {**params, 'offset': next_offset}
+            continue
+        elif headers.get('x-has-more', '').lower() == 'false':
+            return found
+        elif headers.get('x-has-more', '').lower() == 'true':
+            rows = data[kind + 's']
+            if not rows or 'cursor' in params:
+                raise SyncError('MDBList: page vide ou mode de pagination incohérent.')
+            params = {**params, 'offset': params.get('offset', 0) + len(rows)}
+            continue
         else:
-            raise SyncError('MDBList: pagination du catalogue absente; arrêt avant écriture.')
+            keys = ', '.join(sorted(pagination)) if isinstance(pagination, dict) else 'aucune'
+            raise SyncError(f'MDBList: pagination du catalogue absente (champs : {keys}); arrêt avant écriture.')
         if cursor is None or cursor == '':
             return found
         if not isinstance(cursor, str) or cursor in cursors:

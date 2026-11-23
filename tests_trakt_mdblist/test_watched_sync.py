@@ -230,6 +230,34 @@ class SyncTests(unittest.TestCase):
         self.assertTrue(watched_snapshot(api, 'episode')[1]['watched'])
         self.assertEqual(watched_snapshot(FakeAPI([snapshot([])]), 'movie'), {})
 
+    def test_bulk_snapshot_reads_legacy_offset_metadata(self):
+        def page(rows, total, offset, limit):
+            payload, headers = snapshot(rows)
+            payload['pagination'] = dict(total=total, offset=offset, limit=limit)
+            return payload, headers
+        # A server-clamped short page must not truncate the catalogue.
+        api = FakeAPI([page([(1, DATE)], 2, 0, 1), page([(2, OLD)], 2, 1, 1)])
+        self.assertEqual(plan(api, 'movie', [item(1), item(2)]), [item(2)])
+        self.assertEqual(api.calls[1][1]['offset'], 1)
+        self.assertEqual(watched_snapshot(FakeAPI([page([], 0, 0, 1000)]), 'movie'), {})
+
+    def test_bulk_snapshot_rejects_inconsistent_offset_metadata(self):
+        for pagination in [dict(total=2, offset=1, limit=1000),
+                           dict(total=2, offset=0, limit=0),
+                           dict(total=2, offset=0, limit=1000),
+                           dict(total='2', offset=0, limit=1000)]:
+            with self.assertRaises(SyncError):
+                watched_snapshot(FakeAPI([({'movies': [], 'pagination': pagination}, {})]), 'movie')
+
+    def test_bulk_snapshot_accepts_has_more_headers(self):
+        first, _ = snapshot([(1, DATE)])
+        last, _ = snapshot([(2, DATE)])
+        first.pop('pagination')
+        last.pop('pagination')
+        api = FakeAPI([(first, {'x-has-more': 'true'}), (last, {'x-has-more': 'false'})])
+        self.assertEqual(set(watched_snapshot(api, 'movie')), {1, 2})
+        self.assertEqual(api.calls[1][1]['offset'], 1)
+
     def test_bulk_snapshot_keeps_latest_duplicate_and_skips_unmapped_ids(self):
         api = FakeAPI([snapshot([(1, DATE)], cursor='next'),
                        snapshot([(1, OLD), (None, DATE)])])
