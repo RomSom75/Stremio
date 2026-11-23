@@ -59,6 +59,8 @@ class CatalogueParser(HTMLParser):
                          "type": {"serie": "shows", "program": "movies", "collection": "collections"}[kind], "year": None}
         if self.tile and a.get("data-metadata") == "date_aaaa":
             self.capture, self.text = "year", ""
+        if self.tile and a.get("data-metadata") == "category":
+            self.capture, self.text = "category", ""
         if self.active and "pagination__next" in a.get("class", "").split():
             self.next_url = a.get("href")
 
@@ -75,6 +77,15 @@ class CatalogueParser(HTMLParser):
         if self.capture == "year" and tag == "span":
             if self.tile and re.fullmatch(r"\s*(?:19|20)\d{2}\s*", self.text):
                 self.tile["year"] = int(self.text)
+            self.capture = None
+        if self.capture == "category" and tag == "span":
+            if self.tile:
+                self.tile["category"] = self.text.strip()
+                category = normalise(self.text)
+                if category == "series":
+                    self.tile["type"] = "shows"
+                elif category in {"films", "courts metrages", "documentaires", "theatre"}:
+                    self.tile["type"] = "movies"
             self.capture = None
         if tag == "article" and self.tile:
             self.items[self.tile["source_id"]] = self.tile

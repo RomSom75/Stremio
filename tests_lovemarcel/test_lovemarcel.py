@@ -53,6 +53,13 @@ class LoveMarcelTests(unittest.TestCase):
         with self.assertRaises(SyncError):
             page.feed('<div id="inf-catalog-container"><article data-content-id="1" data-item-type="unknown" title="X">')
 
+    def test_short_film_category_takes_precedence_over_serie_container(self):
+        page = CatalogueParser()
+        page.feed('''<div id="inf-catalog-container"><article data-content-id="1"
+          data-item-type="serie" title="Court"><span data-metadata="category">Courts métrages</span>
+          <span data-metadata="date_aaaa">2021</span></article></div>''')
+        self.assertEqual(page.items["1"]["type"], "movies")
+
     def test_accents_and_punctuation(self):
         self.assertEqual(normalise("L’Âme sœur"), normalise("L'ame soeur"))
 
