@@ -1,0 +1,67 @@
+name: LoveMarcel vers MDBList
+
+on:
+  pull_request:
+    paths:
+      - sync_lovemarcel.py
+      - tests_lovemarcel/**
+      - lovemarcel-overrides.json
+      - .github/workflows/sync-lovemarcel.yml
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Appliquer les ajouts (sinon simulation)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lovemarcel-mdblist-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'schedule' && vars.LOVEMARCEL_SYNC_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Tests LoveMarcel
+        run: python -m unittest discover -s tests_lovemarcel -v
+      - name: Synchroniser ou simuler
+        env:
+          TMDB_API_TOKEN: ${{ secrets.TMDB_API_TOKEN }}
+          MDBLIST_API_KEY: ${{ secrets.MDBLIST_API_KEY }}
+          LOVEMARCEL_LIST_ID: romain85/lovemarcel
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+        run: |
+          args=()
+          if [ "$APPLY" = "true" ]; then args+=(--apply); fi
+          python sync_lovemarcel.py "${args[@]}"
+      - name: Conserver les découvertes même si MDBList échoue
+        if: always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.apply == true))
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lovemarcel-catalog.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: record cumulative LoveMarcel catalogue"
+            git pull --rebase
+            git push
+          fi
+      - name: Rapport LoveMarcel
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lovemarcel-sync-report
+          path: reports/lovemarcel/
+          if-no-files-found: ignore

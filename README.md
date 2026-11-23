@@ -116,3 +116,58 @@ python -m unittest discover -s tests_trakt_mdblist -v
 - [Recherche de films TMDb](https://developer.themoviedb.org/reference/search-movie)
 - [API MDBList](https://api.mdblist.com/docs/)
 - [Intégrations MDBList](https://mdblist.com/apps/)
+
+## Catalogue cumulatif LoveMarcel
+
+Le workflow `LoveMarcel vers MDBList` alimente la liste statique
+`romain85/lovemarcel` avec les films, courts métrages, documentaires et séries
+identifiés dans le catalogue public LoveMarcel. Il réutilise `TMDB_API_TOKEN`
+et `MDBLIST_API_KEY`. Aucune clé supplémentaire n'est nécessaire.
+
+- **Ajouts uniquement** : aucun titre n'est supprimé, même s'il disparaît de
+  LoveMarcel ou s'il est déjà vu. L'historique de visionnage n'est pas consulté.
+- Les films et séries utilisent des identifiants séparés ; les doublons sont ignorés.
+- Les regroupements éditoriaux ne sont pas identifiés comme des œuvres.
+- Une identification automatique exige un titre exact (français ou original)
+  et la même année. Les ambiguïtés sont conservées dans le rapport, sans bloquer
+  les autres ajouts. Les compilations sans année nécessitent une correction.
+- L'historique `lovemarcel-catalog.json` est cumulatif et enregistré même après
+  une erreur d'écriture MDBList. Une relance tente à nouveau les ajouts manquants.
+
+Dans **Actions → LoveMarcel vers MDBList → Run workflow**, le lancement est une
+**simulation par défaut**. Cocher `apply` applique les ajouts. L'exécution
+quotidienne est prévue à **05:41 UTC** (06:41 en hiver, 07:41 en été à Paris)
+et s'active avec la variable Actions `LOVEMARCEL_SYNC_ENABLED=true`.
+
+L'artefact `lovemarcel-sync-report` contient le catalogue extrait (`source.json`),
+les titres non résolus et leurs candidats (`unresolved.json`), le catalogue
+proposé et les ajouts calculés (`changes.json`). La simulation ne modifie ni
+MDBList ni l'historique du dépôt. Après application, une relecture de MDBList
+confirme la présence des titres ajoutés ; une absence provoque une erreur.
+
+Pour corriger une correspondance, renseigner dans `lovemarcel-overrides.json`
+l'identifiant LoveMarcel (clé `source_id` du rapport) et l'identifiant TMDb :
+
+```json
+{
+  "12345": 67890
+}
+```
+
+Le type film/série reste celui de la source. Vérifier l'identifiant avant de
+l'enregistrer : une correction ne supprime jamais une ancienne correspondance
+qui aurait déjà été ajoutée à MDBList.
+
+```bash
+python sync_lovemarcel.py --catalogue-only  # catalogue public, sans clés
+python sync_lovemarcel.py                   # simulation avec les deux clés
+python sync_lovemarcel.py --apply           # appliquer les ajouts
+python -m unittest discover -s tests_lovemarcel -v
+```
+
+Les formats de requête sont décrits dans les documentations officielles
+[TMDb films](https://developer.themoviedb.org/reference/search-movie),
+[TMDb séries](https://developer.themoviedb.org/reference/search-tv) et
+[MDBList](https://api.mdblist.com/docs/). La pagination MDBList utilise
+`offset`, toujours pris en charge ; chaque type est lu séparément par pages
+pour éviter de tronquer les listes mixtes.
