@@ -2,10 +2,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sync_lovemarcel import CatalogueParser, additions, load_history, normalise, save, select_match, SyncError
+from sync_lovemarcel import CatalogueParser, additions, list_item_tmdb_id, load_history, normalise, save, select_match, SyncError
 
 
 class LoveMarcelTests(unittest.TestCase):
+    def test_mdblist_lightweight_and_full_identifiers(self):
+        for item in [{"tmdb": 123}, {"id": "m123", "tmdb": 123},
+                     {"id": 123}, {"id": "m123", "ids": {"tmdb": 123}}]:
+            self.assertEqual(list_item_tmdb_id(item), 123)
+        for item in [{"id": "m123"}, {"tmdb": None, "id": 123}, {"tmdb": True}]:
+            with self.assertRaises(SyncError):
+                list_item_tmdb_id(item)
+
     def test_movies_shows_and_collections_are_distinct(self):
         page = CatalogueParser()
         page.feed('''<article data-content-id="advert" data-item-type="program" title="Ad"></article>

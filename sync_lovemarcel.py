@@ -198,6 +198,22 @@ def mdb(session, key, method, path, **kwargs):
     return api(session, method, MDB + path, params=params, **kwargs)
 
 
+def list_item_tmdb_id(item):
+    if not isinstance(item, dict):
+        raise SyncError("Invalid MDBList item")
+    # Lightweight responses identify TMDb with `tmdb`; full responses use
+    # `ids.tmdb` or `id`. Never treat an internal MDBList ID as a TMDb ID.
+    if "tmdb" in item:
+        value = item["tmdb"]
+    elif isinstance(item.get("ids"), dict) and "tmdb" in item["ids"]:
+        value = item["ids"]["tmdb"]
+    else:
+        value = item.get("id")
+    if not positive_id(value):
+        raise SyncError("Invalid MDBList TMDb identifier")
+    return value
+
+
 def read_list(session, key, list_id):
     result = {kind: set() for kind in BUCKETS}
     # Offset is still supported by MDBList. Filter each bucket to avoid ambiguity
@@ -211,9 +227,7 @@ def read_list(session, key, list_id):
                 raise SyncError("Invalid MDBList item response")
             ids = []
             for item in data[bucket]:
-                if not isinstance(item, dict) or not positive_id(item.get("id")):
-                    raise SyncError("Invalid MDBList identifier")
-                ids.append(item["id"])
+                ids.append(list_item_tmdb_id(item))
             if ids and not (set(ids) - result[bucket]):
                 raise SyncError("Repeated MDBList page")
             result[bucket].update(ids)
